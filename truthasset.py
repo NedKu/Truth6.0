@@ -1122,12 +1122,12 @@ else:
                 st.markdown("#### 🎁 抄底引擎")
                 engine_c1, engine_c2, engine_c3, engine_c4 = st.columns(4)
                 engine_c1.metric("當前 Level", vt_level)
-                engine_c2.metric("可動用現金 %", f"{suggested_invest}%")
-                engine_c3.metric("剩餘現金 %", f"{remaining_cash}%")
+                engine_c2.metric("本次部署額 %", f"{suggested_invest:.1f}%")
+                engine_c3.metric("可部署防守池 %", f"{deployable_defense_pool:.1f}%")
                 engine_c4.metric("FTD", "✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded")
 
                 if vt_level != "未觸發" and not already_executed and not vix_ammo_state["delay"]:
-                    st.warning(f"👉 目前可依分級動用 {suggested_invest}% 現金｜剩餘現金：{remaining_cash}%")
+                    st.warning(f"👉 目前可依分級動用 {suggested_invest:.1f}%｜防守資產池={defense_pool:.1f}%｜保留 10%｜可部署池={deployable_defense_pool:.1f}%")
                 elif vt_level == "Level 5" and vix_ammo_state["delay"]:
                     st.info("⏸️ Level 5 暫緩：VIX 仍創高，先保留子彈。")
                 elif vt_level != "未觸發" and already_executed:
