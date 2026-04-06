@@ -5,6 +5,7 @@ import requests
 import io
 import numpy as np
 import plotly.graph_objects as go
+import re
 from datetime import datetime, timedelta
 
 # --- 1. 初始化與介面設定 ---
@@ -107,13 +108,81 @@ def fetch_macro_data():
             vix_df = vix_df.iloc[:, 0]
         vix_df = vix_df.dropna()
 
-        return macro_df, vix_df
+        pmi_url = "https://tradingeconomics.com/united-states/manufacturing-pmi"
+        pmi_resp = requests.get(pmi_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        pmi_resp.raise_for_status()
+        pmi_html = pmi_resp.text
+        pmi_match = re.search(
+            r'Manufacturing PMI in the United States increased to\s+([0-9.]+)\s+points in\s+([A-Za-z]+)\s+from\s+([0-9.]+)\s+points in\s+([A-Za-z]+)\s+of\s+([0-9]{4})',
+            pmi_html,
+        )
+
+        pmi_info = None
+        if pmi_match:
+            current_val = float(pmi_match.group(1))
+            current_month = pmi_match.group(2)
+            previous_val = float(pmi_match.group(3))
+            previous_month = pmi_match.group(4)
+            current_year = int(pmi_match.group(5))
+            pmi_info = {
+                "current": current_val,
+                "previous": previous_val,
+                "source_url": pmi_url,
+                "source_label": "TradingEconomics｜ISM 製造業 PMI",
+                "current_month": current_month,
+                "previous_month": previous_month,
+                "current_year": current_year,
+                "reference_url": "https://www.ismworld.org/",
+                "reference_label": "ISM 官網（人工參考）",
+            }
+
+        nowcast_url = "https://www.clevelandfed.org/-/media/files/webcharts/inflationnowcasting/nowcast_year.json?sc_lang=en"
+        nowcast_resp = requests.get(nowcast_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        nowcast_resp.raise_for_status()
+        nowcast_json = nowcast_resp.json()[0]
+        categories = nowcast_json.get("categories", [{}])[0].get("category", [])
+        labels = [item.get("label", "") for item in categories]
+        dataset = {item.get("seriesname", ""): item.get("data", []) for item in nowcast_json.get("dataset", [])}
+
+        cpi_nowcast_values = dataset.get("CPI Inflation", [])
+        cpi_actual_values = dataset.get("Actual CPI Inflation", [])
+        cpi_nowcast_points = []
+        cpi_actual_points = []
+
+        for idx, label in enumerate(labels):
+            if idx < len(cpi_nowcast_values):
+                val = cpi_nowcast_values[idx].get("value", "")
+                if val not in ("", None):
+                    cpi_nowcast_points.append({"label": label, "value": float(val)})
+            if idx < len(cpi_actual_values):
+                val = cpi_actual_values[idx].get("value", "")
+                if val not in ("", None):
+                    cpi_actual_points.append({"label": label, "value": float(val)})
+
+        cpi_nowcast_info = {
+            "source_url": "https://www.clevelandfed.org/indicators-and-data/inflation-nowcasting",
+            "source_label": "Cleveland Fed｜Inflation Nowcasting",
+            "updated_at": nowcast_json.get("chart", {}).get("_comment", ""),
+            "current": cpi_nowcast_points[-1]["value"] if cpi_nowcast_points else None,
+            "current_label": cpi_nowcast_points[-1]["label"] if cpi_nowcast_points else None,
+            "previous": cpi_nowcast_points[-2]["value"] if len(cpi_nowcast_points) >= 2 else (cpi_nowcast_points[-1]["value"] if cpi_nowcast_points else None),
+            "previous_label": cpi_nowcast_points[-2]["label"] if len(cpi_nowcast_points) >= 2 else (cpi_nowcast_points[-1]["label"] if cpi_nowcast_points else None),
+            "actual": cpi_actual_points[-1]["value"] if cpi_actual_points else None,
+            "actual_label": cpi_actual_points[-1]["label"] if cpi_actual_points else None,
+            "series": pd.Series(
+                [point["value"] for point in cpi_nowcast_points],
+                index=[point["label"] for point in cpi_nowcast_points],
+                name="CPI Nowcast YoY (%)",
+            ) if cpi_nowcast_points else None,
+        }
+
+        return macro_df, vix_df, pmi_info, cpi_nowcast_info
     except Exception:
-        return None, None
+        return None, None, None, None
 
 # 下載資料
 df_close, df_vol, df_low = fetch_system_data()
-df_macro, df_vix = fetch_macro_data()
+df_macro, df_vix, pmi_info, cpi_nowcast_info = fetch_macro_data()
 
 # --- 3. 側邊欄：個人化參數與 PMI 趨勢判斷 ---
 st.sidebar.header("👤 1. 個人化參數")
@@ -128,21 +197,45 @@ view_mode = st.sidebar.radio("選擇模式", ["Beginner", "Pro", "Master"], inde
 st.sidebar.divider()
 st.sidebar.header("⚙️ 3. 當前經濟輸入")
 st.sidebar.markdown(
-    """
-👉 PMI 數據來源：
-[點此查詢 TradingEconomics (ISM 製造業 PMI)](https://tradingeconomics.com/united-states/manufacturing-pmi)
-請從圖表中讀取近 3 個月數值，填入下方，系統自動幫您判斷趨勢！
-"""
+    "[🔗 ISM 製造業 PMI 近月數值來源｜TradingEconomics](https://tradingeconomics.com/united-states/manufacturing-pmi)"
+)
+st.sidebar.markdown(
+    "[🔗 ISM 官網即時參考｜ismworld.org](https://www.ismworld.org/)"
 )
 
-st.sidebar.markdown("**📊 輸入近 3 個月 PMI（從圖表讀取）**")
+st.sidebar.markdown("**📊 輸入近 3 個月 PMI（維持原本 3 個月判斷邏輯）**")
+if pmi_info is not None:
+    pmi_curr_default = float(pmi_info["current"])
+    pmi_1m_default = float(pmi_info["previous"])
+    st.sidebar.success(
+        f"已自動帶入近 2 個月 PMI：{pmi_info['previous_month']} {pmi_1m_default:.1f} → {pmi_info['current_month']} {pmi_curr_default:.1f}"
+    )
+    st.sidebar.caption(
+        f"資料來源：{pmi_info['source_label']}｜更新月份：{pmi_info['current_month']} {pmi_info['current_year']}"
+    )
+    st.sidebar.info(
+        "請只手動補上『前2月』數值；『上月』與『本月』已依公開網頁最新數值自動帶入。"
+    )
+    st.sidebar.caption(
+        f"ISM 官網目前因驗證機制無法後端自動解析，請開啟 [{pmi_info['reference_label']}]({pmi_info['reference_url']}) 作為即時變化參考。"
+    )
+    st.sidebar.markdown(
+        f"**PMI 即時參考值（公開頁面最新）**  \
+- {pmi_info['current_month']}：`{pmi_curr_default:.1f}`  \
+- {pmi_info['previous_month']}：`{pmi_1m_default:.1f}`"
+    )
+else:
+    pmi_curr_default = 52.2
+    pmi_1m_default = 51.5
+    st.sidebar.warning("PMI 近 2 個月自動抓取失敗，請手動輸入 3 個月數值。")
+
 p_col1, p_col2, p_col3 = st.sidebar.columns(3)
 with p_col1:
-    pmi_2m = st.number_input("前2月", value=52.4, step=0.1)
+    pmi_2m = st.number_input("前2月（手動）", value=52.4, step=0.1)
 with p_col2:
-    pmi_1m = st.number_input("上月", value=51.5, step=0.1)
+    pmi_1m = st.number_input("上月（自動，可覆寫）", value=float(pmi_1m_default), step=0.1)
 with p_col3:
-    pmi_curr = st.number_input("本月", value=52.2, step=0.1)
+    pmi_curr = st.number_input("本月（自動，可覆寫）", value=float(pmi_curr_default), step=0.1)
 
 if pmi_curr > pmi_1m and pmi_curr > pmi_2m:
     pmi_trend = "Up"
@@ -522,13 +615,27 @@ ftd_msg = ftd_guard["message"]
 is_ftd = ftd_guard["ftd_valid"]
 
 cpi_yoy_series = None
+cpi_actual_yoy = None
+cpi_actual_label = "BLS Official"
+cpi_nowcast_label = "Cleveland Fed Nowcast"
 if df_macro is not None:
     cpi_series = df_macro["CPI"].dropna()
     cpi_yoy_series = (cpi_series / cpi_series.shift(12) - 1) * 100
     cpi_yoy_series = cpi_yoy_series.dropna()
 
-    cpi_yoy = (cpi_series.iloc[-1] / cpi_series.iloc[-13] - 1) * 100 if len(cpi_series) >= 13 else 3.0
-    cpi_prev = (cpi_series.iloc[-2] / cpi_series.iloc[-14] - 1) * 100 if len(cpi_series) >= 14 else cpi_yoy
+    cpi_actual_yoy = (cpi_series.iloc[-1] / cpi_series.iloc[-13] - 1) * 100 if len(cpi_series) >= 13 else 3.0
+    cpi_prev = (cpi_series.iloc[-2] / cpi_series.iloc[-14] - 1) * 100 if len(cpi_series) >= 14 else cpi_actual_yoy
+    if cpi_nowcast_info is not None and cpi_nowcast_info.get("current") is not None:
+        cpi_yoy = float(cpi_nowcast_info["current"])
+        cpi_prev = float(cpi_nowcast_info.get("previous", cpi_yoy))
+        cpi_nowcast_label = f"Cleveland Fed Nowcast ({cpi_nowcast_info.get('current_label', 'Latest')})"
+        cpi_actual_label = f"BLS Official ({cpi_nowcast_info.get('actual_label', 'Latest')})"
+        if cpi_nowcast_info.get("series") is not None:
+            cpi_yoy_series = cpi_nowcast_info["series"]
+        if cpi_nowcast_info.get("actual") is not None:
+            cpi_actual_yoy = float(cpi_nowcast_info["actual"])
+    else:
+        cpi_yoy = cpi_actual_yoy
     rate_series = df_macro["Rate"].dropna()
     rate_val = float(rate_series.iloc[-1]) if len(rate_series) else 5.25
     rate_prev = float(rate_series.iloc[-2]) if len(rate_series) >= 2 else rate_val
@@ -539,7 +646,7 @@ if df_macro is not None:
     vix_val = df_vix.values[-1] if df_vix is not None and len(df_vix) > 0 else 18.0
     vix_latest = float(vix_val[0] if isinstance(vix_val, (np.ndarray, list)) else vix_val)
 else:
-    cpi_yoy, rate_val, spread_val, cpi_t, rate_t = 3.2, 5.25, 0.5, "Up", "Up"
+    cpi_yoy, cpi_actual_yoy, rate_val, spread_val, cpi_t, rate_t = 3.2, 3.2, 5.25, 0.5, "Up", "Up"
     vix_latest = 18.0
 
 bond_protection_on = bool(cpi_yoy > BOND_PROTECTION_CPI_THRESHOLD and rate_t == "Up")
@@ -840,10 +947,21 @@ if view_mode == "Master":
 if view_mode in ["Pro", "Master"]:
     st.divider()
     st.header("📊 4D 宏觀儀表板觀測站")
+    st.caption(f"App 內所有通膨判斷目前採用 {cpi_nowcast_label}；同時展示 {cpi_actual_label} 供比對。")
+    cpi_compare_col1, cpi_compare_col2 = st.columns(2)
+    with cpi_compare_col1:
+        st.metric(cpi_nowcast_label, f"{cpi_yoy:.2f}%")
+    with cpi_compare_col2:
+        if cpi_actual_yoy is not None:
+            st.metric(cpi_actual_label, f"{cpi_actual_yoy:.2f}%")
+        else:
+            st.metric(cpi_actual_label, "N/A")
+    if cpi_nowcast_info is not None:
+        st.caption(f"資料來源：[{cpi_nowcast_info['source_label']}]({cpi_nowcast_info['source_url']})｜更新時間：{cpi_nowcast_info.get('updated_at', 'N/A')}")
     g1, g2, g3, g4 = st.columns(4)
     with g1:
         steps = [{"range": [0, 2], "color": "#A7F3D0"}, {"range": [2, 3], "color": "#FDE68A"}, {"range": [3, 10], "color": "#FECACA"}]
-        st.plotly_chart(create_gauge(cpi_yoy, f"CPI YoY 通膨<br><span style='font-size:11px;color:gray'>趨勢: {cpi_t}</span>", 0, 8, steps), width="stretch")
+        st.plotly_chart(create_gauge(cpi_yoy, f"CPI YoY 通膨<br><span style='font-size:11px;color:gray'>來源: Nowcast｜趨勢: {cpi_t}</span>", 0, 8, steps), width="stretch")
     with g2:
         steps = [{"range": [0, 2], "color": "#A7F3D0"}, {"range": [2, 4], "color": "#FDE68A"}, {"range": [4, 8], "color": "#FECACA"}]
         st.plotly_chart(create_gauge(rate_val, f"基準利率 vs 中性區間<br><span style='font-size:11px;color:gray'>趨勢: {rate_t}</span>", 0, 8, steps), width="stretch")
