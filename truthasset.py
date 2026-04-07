@@ -33,65 +33,35 @@ with st.expander("📘 新增功能判斷準則總覽", expanded=False):
 - **下方 gauge / 歷史圖 / 原始資料列表**：固定使用 BLS/FRED 官方歷史資料，避免與 nowcast 混淆。
 
 ### 2. 市場模式（Decision Regime）
-- 先看 FTD Guard：若 FTD 已失效，決策至少壓到 `Caution`。
-- 再看 VT 主軸：
-  - Drawdown ≤ -20% 或 VIX ≥ 30 → `Crisis`
+- 先看 FTD Guard：若 FTD 已失效，或 VT 價格 < 200MA，決策壓回 `Caution`。
+- 再看核心指標：
+  - Drawdown ≤ -20% 或 VIX ≥ 30 → `Crisis`（進入掠食者模式）
   - 價格 < 200MA → `Caution`
   - 其餘 → `Normal`
-- 再看四市場廣度（VT / ^GSPC / QQQ / 0050.TW）：
-  - 3 個以上站上 200MA → 多市場 `Normal`
-  - 2 個站上 200MA → 多市場 `Caution`
-  - 其餘 → 多市場 `Crisis`
-- 最終 `Decision Regime` 取兩者中 **較保守** 的結果。
+- 最終 `Decision Regime` 依據市場廣度與主軸取較保守結果。
 
 ### 3. FTD Guard（Follow-Through Day 防錯）
-- 以 [`^GSPC`](truthasset.py:39) 為防錯基準。
-- 偵測條件：低點後第 4~12 天內，日漲幅 ≥ 1.7% 且成交量高於前一日。
-- 成立後記錄 FTD 收盤價，並計算取消價 = FTD 收盤價 × {FTD_CANCEL_PCT:.2f}。
-- 若現價跌破取消價，FTD 改為 `🔴 Failed`，系統停止主動提高股票曝險。
+- 以 `^GSPC` 為基準，偵測低點後第 4~12 天的放量長紅。
+- **FTD 特赦**：在 `Caution` 模式下，若 FTD 有效，系統會配發 +5% 的股票特赦權重，抵銷部分減碼。
+- 若現價跌破取消價（FTD 收盤價 × {FTD_CANCEL_PCT:.2f}），FTD 轉為 `🔴 Failed`，停止積極買入。
 
 ### 4. 抄底引擎（Drawdown Levels）
-- Level 1 = -20%
-- Level 2 = -25%
-- Level 3 = -30%
-- Level 4 = -35%
-- Level 5 = -40%
-- 危機時可部署現金以上述 Level 對應比例為上限，並受股票上限與 VIX delay 約束。
+- 進入 `Crisis` 後，股票上限由平時的安全水位釋放至 **80%**。
+- 依據回檔階梯（-20%/-25%/-30%/-35%/-40%）分批動用防禦資產。
+- 受 **VIX Delay**（VIX 創高且斜率 > 0 時暫緩）約束。
 
-### 5. VIX Delay（子彈保留）
-- 只在 `Level 5` 時額外檢查。
-- 若最近 **{VIX_DELAY_LOOKBACK} 日** VIX 斜率 > 0，且最新值創區間新高，則延後現金部署。
+### 5. 資產配置核心 (Master Pro 6.0)
+- **股票中樞 (Pivot)**：依距退休年數採 60% / 55% / 45% / 40% 四階梯。
+- **黃金 (Gold)**：固定 **10%**，作為全天候防禦基石。
+- **生存金 (Survival Fund)**：債券 + 現金合計強制保留至少 **10%**，絕不動用。
+- **Tactical Tilt**：平日依 Regime 做 ±5% 偏移，受年齡壓縮係數縮放；危機時不縮放。
 
-### 6. 資產配置核心
-- 黃金固定 **5%**。
-- 股票上限 **{MAX_STOCK_WEIGHT:.0f}%**。
-- 防守資產 = 債券 + 現金。
-- 基礎股債配置先由距退休年數決定，再用 Regime Tilt 微調。
-- `Caution` 且 FTD 有效時，額外給股票 +5% FTD amnesty tilt。
+### 6. 再平衡與入金邏輯
+- **Normal**：新入金按目標比例配置，維持系統平衡。
+- **Caution**：停止提高股票曝險，新資金會留在 **「現金池」** 觀望。
+- **Crisis**：主動將現金池資金按 Level 階梯轉入股市抄底。
+- **Bond Protection**：高通膨環境下，債券權重自動由現金承接。
 
-### 7. Bond Protection（債券保護）
-- 觸發條件二選一：
-  - Core PCE nowcast > 3.0 且 inflation surprise > +{NEGATIVE_SURPRISE_THRESHOLD:.2f}%
-  - CPI YoY > {BOND_PROTECTION_CPI_THRESHOLD:.1f}% 且 FEDFUNDS 趨勢為 Up
-- 啟動後，債券目標權重改由現金承接。
-
-### 8. 再平衡（Band-Based Rebalancing）
-- 股票 band：**±{STOCK_REBALANCE_BAND:.0f}%**
-- 黃金 band：**±{GOLD_REBALANCE_BAND:.0f}%**
-- 債券 band：**±{BOND_REBALANCE_BAND:.0f}%**
-- 低於目標且超出 band → `BUY_TO_TARGET`
-- 高於目標且超出 band → `SELL_TO_TARGET`
-- 現金不走固定 band，而是走事件驅動（drawdown / VIX delay / stock headroom）。
-- Bond 賣出轉股還需通過：`VIX > 20` 或 `價格 < 200MA`。
-
-### 9. 最終優先順序
-1. 資料來源分流（Nowcast vs FRED）
-2. FTD Guard 是否失效
-3. 市場 Regime（200MA / Drawdown / VIX / 廣度）
-4. 資產配置與 Tilt
-5. Bond Protection
-6. Level + VIX Delay
-7. 再平衡 BUY / SELL / HOLD
 """
     )
 
@@ -637,88 +607,107 @@ def combine_merrill_subresults(source_label, pmi, pmi_prev, cpi_yoy, cpi_prev, c
     }
 
 def calc_truth_alloc(age_val, ytr_val, mode_label, bond_protection_on, ftd_confirmed=False, drawdown_val=0.0):
-    gold = 5.0
-
-    if age_val <= 35:
-        base_stock, base_bond, base_cash = 90.0, 0.0, 10.0
-    elif ytr_val >= 10:
-        base_stock, base_bond, base_cash = 80.0, 10.0, 10.0
+    """
+    Truth 6.0 Master Pro: 
+    中樞 60% / 動態範圍 50-80% / 10% 生存金強制鎖定
+    """
+    # 1. 決定股票中樞 (Pivot) - 階梯式 Glide Path
+    if ytr_val > 10:
+        pivot_stock = 60.0
+    elif ytr_val > 5:
+        pivot_stock = 55.0
     elif ytr_val > 0:
-        stock_floor = 50.0
-        stock_ceiling = 90.0
-        progress = min(max(ytr_val, 0.0), 10.0) / 10.0
-        base_stock = stock_floor + (stock_ceiling - stock_floor) * progress
-        defense_total = 95.0 - base_stock
-        base_cash = max(5.0, defense_total * 0.25)
-        base_bond = max(0.0, defense_total - base_cash)
-    else:
-        base_stock, base_bond, base_cash = 50.0, 40.5, 4.5
+        pivot_stock = 45.0
+    else:  # 已退休
+        pivot_stock = 40.0
 
-    safe_cap = min(100.0 - age_val, 50.0 + ytr_val)
-
-    mode_state = "🟢 守成模式 (嚴格限額)"
-    if drawdown_val <= -20 and ftd_confirmed:
-        max_stock = 90.0
-        mode_state = "🔴 掠食者模式 (上限釋放)"
-    else:
-        max_stock = max(35.0, safe_cap)
-
+    # 基礎配置固定 (辯論共識：10% 黃金, 10% 現金)
+    base_gold = 10.0
+    base_cash = 10.0
+    base_bond = 100.0 - pivot_stock - base_gold - base_cash
+    
+    # 2. 市場模式偏移 (Tactical Tilt)
+    # 計算年齡壓縮係數 (Age Compression)，用於平時的 Tilt 縮放
     age_compression = max(0.2, (age_val - 20) / 40)
     regime_tilt = 0.0
-    tilt_reason = "Mode = Neutral"
+    tilt_reason = "Normal"
+
     if "Normal" in mode_label:
-        regime_tilt = 5.0 * age_compression
-        tilt_reason = f"Normal：股票偏向 +5% × 年齡壓縮係數 = {regime_tilt:.1f}%"
+        # 高點防禦：若接近高點則不偏移或小幅減碼
+        regime_tilt = 0.0 # 保持中樞
     elif "Caution" in mode_label:
+        # 警戒模式：縮減股票
         regime_tilt = -5.0 * age_compression
-        tilt_reason = f"Caution：股票偏向 -5% × 年齡壓縮係數 = {regime_tilt:.1f}%"
-    elif "Crisis" in mode_label:
-        regime_tilt = 0.0
-        tilt_reason = "Crisis：Level 啟動後，股票上限打開，增額改由債券+現金分五次移動；最後仍保留總資產 10% 的債券+現金。"
+        if ftd_confirmed: # FTD 特赦
+            regime_tilt += 5.0
+            tilt_reason = "Caution (FTD Amnesty)"
+    
+    # 3. 動態風險上限 (Dynamic Risk Cap)
+    safe_cap = min(100.0 - age_val, 50.0 + ytr_val)
+    
+    if drawdown_val <= -20:
+        # 🔴 掠食者模式：危機時上限釋放至 80%
+        max_stock = 80.0
+        mode_state = "🔴 掠食者模式 (上限釋放)"
+        # 危機時不執行 age_compression 限制，允許直接加碼至上限
+        if "Crisis" in mode_label:
+            regime_tilt = 10.0 
+    else:
+        # 🟢 守成模式：嚴格限額 (平時 60% 左右)
+        max_stock = min(pivot_stock, safe_cap)
+        mode_state = "🟢 守成模式 (嚴格限額)"
 
-    stock_raw = base_stock + regime_tilt
-    overflow = max(0.0, stock_raw - max_stock)
+    # 4. 溢位處理 (Overflow Handling)
+    stock_raw = pivot_stock + regime_tilt
     stk_f = min(stock_raw, max_stock)
+    overflow = max(0.0, stock_raw - max_stock)
 
-    bond_raw = base_bond
-    cash_raw = base_cash + overflow
+    # 5. 殘餘正規化 (Residual Normalization) - 核心修正
+    # 確保股票比例 stk_f 絕對不被二次縮放
+    current_bond = base_bond
+    current_gold = base_gold
+    current_cash = base_cash + overflow
 
     if bond_protection_on:
-        cash_raw += bond_raw
-        bond_raw = 0.0
+        current_cash += current_bond
+        current_bond = 0.0
 
-    others_sum = bond_raw + gold + cash_raw
+    # 計算非股票資產的總合與剩餘空間
+    others_sum = current_bond + current_gold + current_cash
     remaining_space = 100.0 - stk_f
+    
     if others_sum > 0:
-        bnd_f = (bond_raw / others_sum) * remaining_space
-        gld_f = (gold / others_sum) * remaining_space
-        csh_f = (cash_raw / others_sum) * remaining_space
+        bnd_f = (current_bond / others_sum) * remaining_space
+        gld_f = (current_gold / others_sum) * remaining_space
+        csh_f = (current_cash / others_sum) * remaining_space
     else:
-        bnd_f, gld_f, csh_f = 0.0, gold, remaining_space - gold
+        bnd_f, gld_f, csh_f = 0.0, current_gold, remaining_space - current_gold
 
-    total_alloc = stk_f + bnd_f + gld_f + csh_f
-    alloc_gap = total_alloc - 100.0
-    defense_total = base_bond + base_cash
+    # 6. 生存金最終檢核 (確保 Cash + Bond >= 10.0)
+    survival_fund = bnd_f + csh_f
+    if survival_fund < 10.0:
+        gap = 10.0 - survival_fund
+        stk_f -= gap
+        csh_f += gap
 
-    bond_reason = f"基礎股債現金={base_stock:.1f}/{base_bond:.1f}/{base_cash:.1f}；平時上限 {safe_cap:.1f}%；目前股票上限 {max_stock:.1f}%；溢出 {overflow:.1f}% 轉入現金；危機部署從債券+現金移轉，但總資產保留 10% 做生活緩衝"
+    # 計算一些 UI 需要的輔助數值
+    defense_after = bnd_f + csh_f
 
     explain = {
         "tilt_reason": tilt_reason,
-        "bond_reason": bond_reason,
-        "mode_label": mode_label,
         "mode_state": mode_state,
         "safe_cap": safe_cap,
         "max_stock": max_stock,
-        "defense_total": defense_total,
-        "defense_after": 100.0 - stk_f - gld_f,
-        "total_alloc": total_alloc,
-        "alloc_gap": alloc_gap,
-        "regime_tilt": regime_tilt,
-        "ftd_amnesty_tilt": 5.0 if ftd_confirmed else 0.0,
+        "bond_reason": f"中樞 {pivot_stock}% | 生存金底線 10.0%",
         "stock_tilt": regime_tilt,
+        "mode_label": mode_label,
+        "defense_total": base_bond + base_cash,
+        "defense_after": defense_after,
+        "total_alloc": 100.0,
+        "alloc_gap": 0.0
     }
 
-    return stk_f, bnd_f, gld_f, csh_f, base_stock, base_bond, base_cash, regime_tilt, age_compression, explain
+    return stk_f, bnd_f, gld_f, csh_f, pivot_stock, base_bond, base_cash, regime_tilt, age_compression, explain
 
 def evaluate_vix_ammo_delay(vix_series, level_label):
     if vix_series is None or len(vix_series) < VIX_DELAY_LOOKBACK:
@@ -1054,13 +1043,12 @@ with st.expander("❓ 這裡怎麼判斷？", expanded=False):
 **Layer 1 的目的：先決定市場風險模式，再決定能不能提高股票曝險。**
 
 **判斷順序**
-1. 先看 FTD Guard：若已失效，決策至少維持在 `Caution`。
-2. 再看 VT 主軸：
-   - Drawdown ≤ -20% 或 VIX ≥ 30 → `Crisis`
+1. 先看 FTD Guard：若已失效，或價格跌破 200MA，決策壓回 `Caution`。
+2. 再看核心指標：
+   - Drawdown ≤ -20% 或 VIX ≥ 30 → `Crisis` (進入掠食者模式)
    - 價格 < 200MA → `Caution`
    - 其餘 → `Normal`
-3. 再看四市場廣度（VT / ^GSPC / QQQ / 0050.TW 有幾個站上 200MA）。
-4. 最終 `Decision Regime` 取較保守結果。
+3. 最終 `Decision Regime` 依據市場廣度與主軸取較保守結果。
 
 **你現在看到這個結果，是因為**
 - VT 現價 / 200MA：{market_stats['VT']['price']:.2f} / {market_stats['VT']['ma200']:.2f}
@@ -1110,13 +1098,13 @@ else:
         with st.expander("🩸 血色抄底監控面板 (5階回檔與 200MA 標示)", expanded=True):
             d1, d2, d3, d4 = st.columns(4)
             with d1:
-                st.plotly_chart(create_drawdown_gauge("VT", "VT (全球股市)", df_close), width="stretch")
+                st.plotly_chart(create_drawdown_gauge("VT", "VT (全球股市)", df_close), use_container_width=True)
             with d2:
-                st.plotly_chart(create_drawdown_gauge("0050.TW", "0050.TW (台灣50)", df_close), width="stretch")
+                st.plotly_chart(create_drawdown_gauge("0050.TW", "0050.TW (台灣50)", df_close), use_container_width=True)
             with d3:
-                st.plotly_chart(create_drawdown_gauge("QQQ", "QQQ (納斯達克)", df_close), width="stretch")
+                st.plotly_chart(create_drawdown_gauge("QQQ", "QQQ (納斯達克)", df_close), use_container_width=True)
             with d4:
-                st.plotly_chart(create_drawdown_gauge("^GSPC", "S&P 500", df_close), width="stretch")
+                st.plotly_chart(create_drawdown_gauge("^GSPC", "S&P 500", df_close), use_container_width=True)
 
             if view_mode == "Pro":
                 st.markdown("#### 🎁 抄底引擎")
@@ -1137,7 +1125,7 @@ if ftd_guard.get("stop_investing"):
     st.warning(f"FTD 防錯機制啟動：{ftd_guard['message']}")
 if bond_protection_on:
     st.info("債券保護開關啟動：CPI > 3.5% 且 FEDFUNDS 上行，債券目標權重以現金取代。")
-if vix_ammo_state["delay"]:
+
     st.warning(vix_ammo_state["message"])
 
 vt_stock_target = stk_p * (2 / 3)
@@ -1172,21 +1160,22 @@ with nav1:
 """
         )
     if current_mode == "🔴 危機":
-        action_msg = f"危機應對｜Level={vt_level}｜目前可動用 {suggested_invest}% 現金"
+        action_msg = f"掠食者模式｜Level={vt_level}｜依計畫動用現金抄底"
     elif current_mode == "🟡 警戒":
-        action_msg = "停止主動提高股票曝險｜保留現金"
+        action_msg = "警戒避震｜停止主動買入股票｜新資金停留現金池"
     elif exit_ready:
-        action_msg = "停止危機部署｜回到目標配置｜啟動再平衡"
+        action_msg = "脫離危機區｜回到中樞配置｜啟動正常再平衡"
     else:
-        action_msg = "維持目標配置｜必要時做 band 再平衡"
-    st.markdown(f"### 📍 當前行動指令：**{action_msg}**")
+        action_msg = "正常航行｜維持配置比例｜必要時再平衡"
+    st.markdown(f"### 🎯 指令行動：**{action_msg}**")
 
     if current_mode == "🔴 危機":
-        st.error("🔴 危機模式：依回檔與防錯規則動用現金。")
+        st.error("🔴 危機模式：股票上限釋放至 80%，依回檔階梯主動消耗現金部署股市。")
     elif current_mode == "🟡 警戒":
-        st.warning("🟡 警戒模式：停止主動提高股票曝險，保留現金。")
+        st.warning("🟡 警戒模式：停止主動提高股票曝險，保持目前持倉，新入金的資金會停留在「現金池」，而不是投入股市。")
     else:
-        st.success("🟢 正常模式：維持目標配置，必要時再平衡。")
+        st.success("🟢 正常模式：維持目標配置，新資金應依比例配置，若偏離 band 則執行再平衡。")
+
 
     if exit_ready and view_mode in ["Pro", "Master"]:
         st.success("🛑 Exit Rule 啟動：價格已站上 200MA 且脫離危機區，停止危機部署並回到再平衡框架。")
@@ -1333,16 +1322,16 @@ if view_mode in ["Pro", "Master"]:
     g1, g2, g3, g4 = st.columns(4)
     with g1:
         steps = [{"range": [0, 2], "color": "#A7F3D0"}, {"range": [2, 3], "color": "#FDE68A"}, {"range": [3, 10], "color": "#FECACA"}]
-        st.plotly_chart(create_gauge(cpi_actual_yoy, f"CPI YoY 通膨<br><span style='font-size:11px;color:gray'>來源: FRED｜趨勢: {cpi_t}</span>", 0, 8, steps), width="stretch")
+        st.plotly_chart(create_gauge(cpi_actual_yoy, f"CPI YoY 通膨<br><span style='font-size:11px;color:gray'>來源: FRED｜趨勢: {cpi_t}</span>", 0, 8, steps), use_container_width=True)
     with g2:
         steps = [{"range": [0, 2], "color": "#A7F3D0"}, {"range": [2, 4], "color": "#FDE68A"}, {"range": [4, 8], "color": "#FECACA"}]
-        st.plotly_chart(create_gauge(rate_val, f"基準利率 vs 中性區間<br><span style='font-size:11px;color:gray'>趨勢: {rate_t}</span>", 0, 8, steps), width="stretch")
+        st.plotly_chart(create_gauge(rate_val, f"基準利率 vs 中性區間<br><span style='font-size:11px;color:gray'>趨勢: {rate_t}</span>", 0, 8, steps), use_container_width=True)
     with g3:
         steps = [{"range": [-3, 0], "color": "#FECACA"}, {"range": [0, 1], "color": "#FDE68A"}, {"range": [1, 4], "color": "#A7F3D0"}]
-        st.plotly_chart(create_gauge(spread_val, "利差 (10Y-2Y)", -2, 4, steps, suffix=""), width="stretch")
+        st.plotly_chart(create_gauge(spread_val, "利差 (10Y-2Y)", -2, 4, steps, suffix=""), use_container_width=True)
     with g4:
         steps = [{"range": [0, 15], "color": "#BFDBFE"}, {"range": [15, 20], "color": "#A7F3D0"}, {"range": [20, 30], "color": "#FDE68A"}, {"range": [30, 60], "color": "#FECACA"}]
-        st.plotly_chart(create_gauge(vix_latest, "VIX 恐慌指數", 0, 60, steps, suffix=""), width="stretch")
+        st.plotly_chart(create_gauge(vix_latest, "VIX 恐慌指數", 0, 60, steps, suffix=""), use_container_width=True)
 
     with st.expander("📈 查看各指標歷史趨勢圖及原始資料列表"):
         if df_macro is not None and cpi_yoy_series is not None:
@@ -1365,7 +1354,7 @@ if view_mode in ["Pro", "Master"]:
 
             st.caption("以下為近期原始不重複數據列：")
             display_df = df_macro.tail(180).dropna(subset=["CPI", "CorePCE", "Rate"], how="all")
-            st.dataframe(display_df.tail(10).sort_index(ascending=False), width="stretch")
+            st.dataframe(display_df.tail(10).sort_index(ascending=False), use_container_width=True)
         else:
             st.warning("目前使用手動輸入模式，無歷史數據可顯示。")
 
@@ -1537,7 +1526,7 @@ if view_mode in ["Pro", "Master"]:
         {"景氣階段": "⚠️ 滯脹", "判斷基準": "PMI < 50 且走弱；通膨高且黏；利率維持限制水位", "結果": "黃金(避險) / 現金池"},
         {"景氣階段": "📉 衰退", "判斷基準": "PMI < 45 且持續走弱；通膨快速回落；利率轉向下行", "結果": "債券(防禦) / 股票(等待 FTD)"},
     ])
-    st.dataframe(merrill_clock_reference_df, width="stretch", hide_index=True)
+    st.dataframe(merrill_clock_reference_df, use_container_width=True, hide_index=True)
 
     regime_bg_df = pd.DataFrame({
         "指標": [
