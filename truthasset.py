@@ -920,7 +920,7 @@ radar_tickers = {
 radar_rows = []
 for ticker, label in radar_tickers.items():
     series = df_close[ticker].dropna() if df_close is not None and ticker in df_close.columns else pd.Series(dtype=float)
-    vol_series = df_vol[ticker].dropna() if df_vol is not None and ticker in df_vol.columns else pd.Series(dtype=float)
+    vol_series = df_vol[ticker].dropna() if df_vol is not None and ticker in df_close.columns else pd.Series(dtype=float)
     price = float(series.iloc[-1]) if not series.empty else 100.0
     ma50_series = series.rolling(50).mean().dropna() if not series.empty else pd.Series(dtype=float)
     ma200_series = series.rolling(200).mean().dropna() if not series.empty else pd.Series(dtype=float)
@@ -1021,26 +1021,29 @@ if view_mode == "Master":
         f"{regime_light} {regime_metric_label}",
         current_mode,
     )
-    tension_c1.caption(f"{decision_regime}｜{regime_short_reason}")
-    st.info(
-        "📘 **模式資產操作指南**：\n"
-        "- **Normal**：新入金按目標比例配置，維持系統平衡。\n"
-        "- **Caution**：停止提高股票曝險，新資金會留在「現金池」觀望。\n"
-        "- **Crisis**：主動將現金池資金按 Level 階梯轉入股市抄底。\n"
-        "- **Bond Protection**：高通膨環境下，債券權重自動由現金承接。"
-    )
+    # 根據目前模式產生對應的操作建議 (與 caption 寫在一起)
+    if "Normal" in decision_regime:
+        guide_i = "新入金按目標比例配置，維持系統平衡。"
+    elif "Caution" in decision_regime:
+        guide_i = "停止提高股票曝險，新資金會留在「現金池」觀望。"
+    else:
+        guide_i = "主動將現金池資金按 Level 階梯轉入股市抄底。"
+    if bond_protection_on:
+        guide_i += "｜高通膨環境下，債券權重自動由現金承接。"
+
+    tension_c1.caption(f"{decision_regime}｜{regime_short_reason}｜📘 {guide_i}")
 
     tension_c2.metric("抄底 Level", f"Level {level_num}", f"投入 {suggested_invest:.1f}%")
     tension_c2.caption(f"防守資產池 {defense_pool:.1f}%｜保留 10% 不動用｜可部署池 {deployable_defense_pool:.1f}%")
 
     tension_c3.metric("BLS/FRED Clock Phase", macro_background_bls["phase"])
     tension_c3.caption(
-        f"PMI={macro_background_bls['PMI']}｜CPI={cpi_actual_yoy:.2f}%({cpi_t})｜Core PCE={bls_core_pce_yoy:.2f}%({core_pce_t})｜Rate={macro_background_bls['Rate']}｜{macro_background_bls['phase_rule']}"
+        f"PMI={macro_background_bls['PMI']}｜CPI={cpi_actual_yoy:.2f}%({cpi_t})｜Core PCE={bls_core_pce_yoy:.2f}%({core_pce_t})｜Rate={macro_background_bls['Rate']}"
     )
 
     tension_c4.metric("Cleveland Fed Clock Phase", macro_background_nowcast["phase"])
     tension_c4.caption(
-        f"PMI={macro_background_nowcast['PMI']}｜CPI={cleveland_cpi_yoy:.2f}%({cpi_t})｜Core PCE={cleveland_core_pce_yoy:.2f}%({core_pce_t})｜Rate={macro_background_nowcast['Rate']}｜{macro_background_nowcast['phase_rule']}"
+        f"PMI={macro_background_nowcast['PMI']}｜CPI={cleveland_cpi_yoy:.2f}%({cpi_t})｜Core PCE={cleveland_core_pce_yoy:.2f}%({core_pce_t})｜Rate={macro_background_nowcast['Rate']}"
     )
 
 st.markdown("### 🧠 Layer 1：市場狀態")
