@@ -491,10 +491,10 @@ def get_global_regime(data_dict):
             bullish_count += 1
 
     if bullish_count >= 3:
-        return "🟢 Normal（多市場）"
+        return "🟢 Normal（多市場 Normal）"
     if bullish_count == 2:
-        return "🟡 Caution（多市場）"
-    return "🔴 Crisis（多市場）"
+        return "🟡 Caution（多市場 Caution）"
+    return "🔴 Crisis（多市場 Crisis）"
 
 PHASE_EMOJI = {
     "復甦": "🟢 復甦",
@@ -1022,6 +1022,13 @@ if view_mode == "Master":
         current_mode,
     )
     tension_c1.caption(f"{decision_regime}｜{regime_short_reason}")
+    st.info(
+        "📘 **模式資產操作指南**：\n"
+        "- **Normal**：新入金按目標比例配置，維持系統平衡。\n"
+        "- **Caution**：停止提高股票曝險，新資金會留在「現金池」觀望。\n"
+        "- **Crisis**：主動將現金池資金按 Level 階梯轉入股市抄底。\n"
+        "- **Bond Protection**：高通膨環境下，債券權重自動由現金承接。"
+    )
 
     tension_c2.metric("抄底 Level", f"Level {level_num}", f"投入 {suggested_invest:.1f}%")
     tension_c2.caption(f"防守資產池 {defense_pool:.1f}%｜保留 10% 不動用｜可部署池 {deployable_defense_pool:.1f}%")
@@ -1074,11 +1081,11 @@ layer1_df = pd.DataFrame([
 if view_mode == "Beginner":
     st.metric("市場模式", current_mode)
     if current_mode == "🔴 危機":
-        st.error(f"👉 行動：依回檔分級調整，當前可動用現金 {suggested_invest}%")
+        st.error(f"👉 **Crisis**：主動將現金池資金按 Level 階梯轉入股市抄底。當前可動用現金 {suggested_invest}%")
     elif current_mode == "🟡 警戒":
-        st.warning("👉 行動：停止主動提高股票曝險，保留現金")
+        st.warning("👉 **Caution**：停止提高股票曝險，新資金會留在「現金池」觀望。")
     else:
-        st.success("👉 行動：維持目標配置，僅在偏離 band 時再平衡")
+        st.success("👉 **Normal**：新入金按目標比例配置，維持系統平衡，僅在偏離 band 時再平衡。")
     beginner_alloc = pd.DataFrame({
         "資產": ["股票", "債券", "黃金", "現金"],
         "配置": [f"{stk_p:.1f}%", f"{bnd_p:.1f}%", f"{gld_p:.1f}%", f"{csh_p:.1f}%"],
