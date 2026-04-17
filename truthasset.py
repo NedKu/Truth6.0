@@ -767,52 +767,12 @@ def create_gauge(val, title, min_v, max_v, steps, suffix="%", ref=None):
     return fig
 
 def create_drawdown_gauge(ticker, label, df):
-    if df is None or ticker not in df.columns:
-        return create_gauge(
-            0,
-            f"{label} - No data",
-            -60,
-            5,
-            [
-                {"range": [-50, -40], "color": "#7F1D1D"},
-                {"range": [-40, -35], "color": "#991B1B"},
-                {"range": [-35, -30], "color": "#B91C1C"},
-                {"range": [-30, -25], "color": "#DC2626"},
-                {"range": [-25, -20], "color": "#EF4444"},
-                {"range": [-20, -15], "color": "#F97316"},
-                {"range": [-15, -10], "color": "#F59E0B"},
-                {"range": [-10, -5], "color": "#EAB308"},
-                {"range": [-5, 0], "color": "#84CC16"},
-            ],
-            suffix="%",
-        )
-
     data = df[ticker].dropna()
-    if data.empty:
-        return create_gauge(
-            0,
-            f"{label} - No data",
-            -60,
-            5,
-            [
-                {"range": [-50, -40], "color": "#7F1D1D"},
-                {"range": [-40, -35], "color": "#991B1B"},
-                {"range": [-35, -30], "color": "#B91C1C"},
-                {"range": [-30, -25], "color": "#DC2626"},
-                {"range": [-25, -20], "color": "#EF4444"},
-                {"range": [-20, -15], "color": "#F97316"},
-                {"range": [-15, -10], "color": "#F59E0B"},
-                {"range": [-10, -5], "color": "#EAB308"},
-                {"range": [-5, 0], "color": "#84CC16"},
-            ],
-            suffix="%",
-        )
-
     curr = data.iloc[-1]
     high = data.tail(252).max()
     ma200 = data.rolling(200).mean().iloc[-1]
-    dd = (curr - high) / high * 100 if high else 0.0
-    ma200_rel = (ma200 - high) / high * 100 if high else 0.0
+    dd = (curr - high) / high * 100
+    ma200_rel = (ma200 - high) / high * 100
 
     steps = [
         {"range": [-50, -40], "color": "#7F1D1D"},
@@ -912,7 +872,7 @@ if df_macro is not None:
     vix_val = df_vix.values[-1] if df_vix is not None and len(df_vix) > 0 else 18.0
     vix_latest = float(vix_val[0] if isinstance(vix_val, (np.ndarray, list)) else vix_val)
 else:
-    cpi_yoy, cpi_actual_yoy, core_pce_yoy, core_pce_actual_yoy, rate_val, spread_val, cpi_t, core_pce_t, rate_t = 3.2, 3.2, 3.0, 3.0, 5.25, 0.5, "Up", "Up", "Up"
+    cpi_yoy, cpi_actual_yoy, core_pce_yoy, core_pce_actual_yoy, cpi_prev, core_pce_prev, rate_val, rate_prev, spread_val, cpi_t, core_pce_t, rate_t = 3.2, 3.2, 3.0, 3.0, 3.2, 3.0, 5.25, 5.25, 0.5, "Up", "Up", "Up"
     vix_latest = 18.0
 
 bond_protection_on = bool(
