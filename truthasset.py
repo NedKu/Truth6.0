@@ -104,6 +104,13 @@ def fetch_system_data():
 def fetch_macro_data():
     end = datetime.now()
     start = end - timedelta(days=730)
+    
+    macro_df = None
+    vix_df = None
+    pmi_info = None
+    cpi_nowcast_info = None
+
+    # 1. Fetch FRED Data
     try:
         metrics = {
             "CPI": "CPIAUCSL",
@@ -121,12 +128,20 @@ def fetch_macro_data():
 
         macro_df = pd.concat(dfs, axis=1, sort=False)
         macro_df.columns = list(metrics.keys())
+    except Exception as e:
+        print(f"Error fetching FRED data: {e}")
 
+    # 2. Fetch VIX Data
+    try:
         vix_df = yf.download("^VIX", start=start, end=end, progress=False, auto_adjust=False)["Close"]
         if isinstance(vix_df, pd.DataFrame):
             vix_df = vix_df.iloc[:, 0]
         vix_df = vix_df.dropna()
+    except Exception as e:
+        print(f"Error fetching VIX data: {e}")
 
+    # 3. Fetch PMI Data
+    try:
         pmi_url = "https://tradingeconomics.com/united-states/manufacturing-pmi"
         pmi_resp = requests.get(pmi_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         pmi_resp.raise_for_status()
@@ -136,7 +151,6 @@ def fetch_macro_data():
             pmi_html,
         )
 
-        pmi_info = None
         if pmi_match:
             current_val = float(pmi_match.group(1))
             current_month = pmi_match.group(2)
@@ -154,96 +168,116 @@ def fetch_macro_data():
                 "reference_url": "https://www.ismworld.org/",
                 "reference_label": "ISM 官網（人工參考）",
             }
+    except Exception as e:
+        print(f"Error fetching PMI data: {e}")
 
+    # 4. Fetch Cleveland Fed Nowcast
+    try:
         nowcast_page_url = "https://www.clevelandfed.org/indicators-and-data/inflation-nowcasting"
         nowcast_resp = requests.get(nowcast_page_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         nowcast_resp.raise_for_status()
         nowcast_html = nowcast_resp.text
 
+        # 更加彈性的 Regex，處理可能的大小寫或屬性
         yoy_table_match = re.search(
-            r"<caption>\s*Inflation, year-over-year percent change\s*</caption>.*?<tbody>(.*?)</tbody>",
+            r"<caption[^>]*>.*?Inflation, year-over-year percent change.*?</caption>.*?<tbody>(.*?)</tbody>",
             nowcast_html,
             re.IGNORECASE | re.DOTALL,
         )
-        if not yoy_table_match:
-            raise ValueError("Cleveland Fed YoY table not found")
+        if yoy_table_match:
+            row_matches = re.findall(r"<tr>(.*?)</tr>", yoy_table_match.group(1), re.IGNORECASE | re.DOTALL)
+            yoy_rows = []
+            for row_html in row_matches:
+                cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, re.IGNORECASE | re.DOTALL)
+                cleaned_cells = [re.sub(r"<.*?>", "", cell).replace("&nbsp;", " ").strip() for cell in cells]
+                if len(cleaned_cells) >= 6:
+                    yoy_rows.append({
+                        "month": cleaned_cells[0],
+                        "cpi": cleaned_cells[1],
+                        "core_cpi": cleaned_cells[2],
+                        "pce": cleaned_cells[3],
+                        "core_pce": cleaned_cells[4],
+                        "updated": cleaned_cells[5],
+                    })
 
-        row_matches = re.findall(r"<tr>(.*?)</tr>", yoy_table_match.group(1), re.IGNORECASE | re.DOTALL)
-        yoy_rows = []
-        for row_html in row_matches:
-            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, re.IGNORECASE | re.DOTALL)
-            cleaned_cells = [re.sub(r"<.*?>", "", cell).replace("&nbsp;", " ").strip() for cell in cells]
-            if len(cleaned_cells) >= 6:
-                yoy_rows.append({
-                    "month": cleaned_cells[0],
-                    "cpi": cleaned_cells[1],
-                    "core_cpi": cleaned_cells[2],
-                    "pce": cleaned_cells[3],
-                    "core_pce": cleaned_cells[4],
-                    "updated": cleaned_cells[5],
-                })
+            def parse_pct(val):
+                if val in (None, "", "—", "-", " "):
+                    return None
+                try:
+                    return float(str(val).replace("%", "").strip())
+                except ValueError:
+                    return None
 
-        yoy_rows = [row for row in yoy_rows if row["month"]]
-        if not yoy_rows:
-            raise ValueError("Cleveland Fed YoY table has no usable rows")
+            def parse_month_label(month_text):
+                try:
+                    return datetime.strptime(month_text.strip(), "%B %Y")
+                except Exception:
+                    return datetime.min
 
-        def parse_pct(val):
-            if val in (None, "", "—", "-"):
-                return None
-            return float(str(val).replace("%", "").strip())
+            # 過濾掉完全沒有數據的行（例如未來月份預留位）
+            valid_rows = [row for row in yoy_rows if parse_pct(row["cpi"]) is not None or parse_pct(row["core_pce"]) is not None]
+            
+            if valid_rows:
+                valid_rows = sorted(valid_rows, key=lambda row: parse_month_label(row["month"]))
+                latest_row = valid_rows[-1]
+                
+                # 尋找有核心數據的最新行
+                latest_cpi_row = next((r for r in reversed(valid_rows) if parse_pct(r["cpi"]) is not None), latest_row)
+                latest_core_pce_row = next((r for r in reversed(valid_rows) if parse_pct(r["core_pce"]) is not None), latest_row)
+                
+                # 尋找前一個月份
+                previous_rows = [r for r in valid_rows if parse_month_label(r["month"]) < parse_month_label(latest_row["month"])]
+                prev_row = previous_rows[-1] if previous_rows else latest_row
 
-        def parse_month_label(month_text):
-            try:
-                return datetime.strptime(month_text.strip(), "%B %Y")
-            except Exception:
-                return datetime.min
+                # 計算 FRED 實際值的同比 (YoY)
+                cpi_actual_yoy = None
+                pce_core_actual_yoy = None
+                cpi_actual_label = None
+                pce_core_actual_label = None
+                cpi_prev_actual_mom = None
+                pce_prev_actual_mom = None
 
-        yoy_rows = sorted(yoy_rows, key=lambda row: parse_month_label(row["month"]))
-        latest_yoy_row = max(yoy_rows, key=lambda row: parse_month_label(row["month"]))
-        latest_cpi_row = latest_yoy_row
-        previous_rows = [row for row in yoy_rows if parse_month_label(row["month"]) < parse_month_label(latest_yoy_row["month"])]
-        previous_cpi_row = max(previous_rows, key=lambda row: parse_month_label(row["month"])) if previous_rows else latest_yoy_row
-        latest_core_pce_row = latest_yoy_row
+                if macro_df is not None:
+                    cpi_series = macro_df["CPI"].dropna()
+                    core_pce_series = macro_df["CorePCE"].dropna()
+                    
+                    if len(cpi_series) >= 13:
+                        cpi_actual_yoy_series = ((cpi_series / cpi_series.shift(12)) - 1) * 100
+                        cpi_actual_yoy = float(cpi_actual_yoy_series.iloc[-1])
+                        cpi_actual_label = cpi_actual_yoy_series.index[-1].strftime("%Y-%m")
+                        cpi_mom = ((cpi_series / cpi_series.shift(1)) - 1) * 100
+                        cpi_prev_actual_mom = float(cpi_mom.iloc[-1])
+                        
+                    if len(core_pce_series) >= 13:
+                        core_pce_yoy_series = ((core_pce_series / core_pce_series.shift(12)) - 1) * 100
+                        pce_core_actual_yoy = float(core_pce_yoy_series.iloc[-1])
+                        pce_core_actual_label = core_pce_yoy_series.index[-1].strftime("%Y-%m")
+                        pce_mom = ((core_pce_series / core_pce_series.shift(1)) - 1) * 100
+                        pce_prev_actual_mom = float(pce_mom.iloc[-1])
 
-        cpi_series = macro_df["CPI"].dropna()
-        core_pce_series = macro_df["CorePCE"].dropna()
-        cpi_actual_yoy_series = ((cpi_series / cpi_series.shift(12)) - 1).dropna() * 100
-        core_pce_actual_yoy_series = ((core_pce_series / core_pce_series.shift(12)) - 1).dropna() * 100
-        cpi_actual_mom = ((cpi_series / cpi_series.shift(1)) - 1) * 100 if len(cpi_series) >= 2 else pd.Series(dtype=float)
-        core_pce_actual_mom = ((core_pce_series / core_pce_series.shift(1)) - 1) * 100 if len(core_pce_series) >= 2 else pd.Series(dtype=float)
+                cpi_nowcast_info = {
+                    "source_url": nowcast_page_url,
+                    "source_label": "Cleveland Fed｜Inflation Nowcasting",
+                    "updated_at": latest_row["updated"],
+                    "cpi_yoy_current": parse_pct(latest_cpi_row["cpi"]),
+                    "cpi_yoy_label": latest_cpi_row["month"],
+                    "cpi_yoy_prev": parse_pct(prev_row["cpi"]),
+                    "cpi_actual_yoy": cpi_actual_yoy,
+                    "cpi_actual_label": cpi_actual_label,
+                    "pce_core_yoy_nowcast": parse_pct(latest_core_pce_row["core_pce"]),
+                    "pce_core_yoy_label": latest_core_pce_row["month"],
+                    "pce_core_yoy_actual": pce_core_actual_yoy,
+                    "pce_core_actual_label": pce_core_actual_label,
+                    "cpi_mom_nowcast": None,  # 從 YoY 表格難以直接提取 MoM
+                    "pce_core_mom_nowcast": None,
+                    "cpi_prev_actual_mom": cpi_prev_actual_mom,
+                    "pce_prev_actual_mom": pce_prev_actual_mom,
+                }
+    except Exception as e:
+        print(f"Error fetching Cleveland Fed data: {e}")
 
-        cpi_series_values = []
-        cpi_series_index = []
-        for row in yoy_rows:
-            cpi_val = parse_pct(row["cpi"])
-            if cpi_val is not None:
-                cpi_series_values.append(cpi_val)
-                cpi_series_index.append(row["month"])
+    return macro_df, vix_df, pmi_info, cpi_nowcast_info
 
-        cpi_nowcast_info = {
-            "source_url": nowcast_page_url,
-            "source_label": "Cleveland Fed｜Inflation Nowcasting YoY Table",
-            "updated_at": latest_yoy_row["updated"],
-            "cpi_yoy_current": parse_pct(latest_cpi_row["cpi"]) if latest_cpi_row else None,
-            "cpi_yoy_label": latest_cpi_row["month"] if latest_cpi_row else latest_yoy_row["month"],
-            "cpi_yoy_prev": parse_pct(previous_cpi_row["cpi"]) if previous_cpi_row else (parse_pct(latest_cpi_row["cpi"]) if latest_cpi_row else None),
-            "cpi_actual_yoy": float(cpi_actual_yoy_series.iloc[-1]) if not cpi_actual_yoy_series.empty else None,
-            "cpi_actual_label": cpi_actual_yoy_series.index[-1].strftime("%Y-%m") if not cpi_actual_yoy_series.empty else None,
-            "pce_core_yoy_nowcast": parse_pct(latest_core_pce_row["core_pce"]) if latest_core_pce_row else None,
-            "pce_core_yoy_label": latest_core_pce_row["month"] if latest_core_pce_row else latest_yoy_row["month"],
-            "pce_core_yoy_actual": float(core_pce_actual_yoy_series.iloc[-1]) if not core_pce_actual_yoy_series.empty else None,
-            "pce_core_actual_label": core_pce_actual_yoy_series.index[-1].strftime("%Y-%m") if not core_pce_actual_yoy_series.empty else None,
-            "cpi_yoy_series": pd.Series(cpi_series_values, index=cpi_series_index, name="CPI Nowcast YoY (%)") if cpi_series_values else None,
-        }
-
-        cpi_nowcast_info["cpi_mom_nowcast"] = None
-        cpi_nowcast_info["pce_core_mom_nowcast"] = None
-        cpi_nowcast_info["cpi_prev_actual_mom"] = float(cpi_actual_mom.dropna().iloc[-1]) if not cpi_actual_mom.dropna().empty else None
-        cpi_nowcast_info["pce_prev_actual_mom"] = float(core_pce_actual_mom.dropna().iloc[-1]) if not core_pce_actual_mom.dropna().empty else None
-
-        return macro_df, vix_df, pmi_info, cpi_nowcast_info
-    except Exception:
-        return None, None, None, None
 
 # 下載資料
 df_close, df_vol, df_low = fetch_system_data()
