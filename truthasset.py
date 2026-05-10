@@ -279,9 +279,147 @@ def fetch_macro_data():
     return macro_df, vix_df, pmi_info, cpi_nowcast_info
 
 
+@st.cache_data(ttl=3600)
+def fetch_cnn_fear_greed():
+    """抓取 CNN Fear & Greed Index，透過 CNN dataviz API"""
+    try:
+        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+
+        fg = data.get("fear_and_greed", {})
+        hist = data.get("fear_and_greed_historical", {})
+        score = float(fg.get("score", 50))
+        rating = fg.get("rating", "Neutral")
+        timestamp = fg.get("timestamp", "")
+
+        prev_close = float(hist.get("previousClose", score)) if hist.get("previousClose") else score
+        one_week = float(hist.get("oneWeekAgo", score)) if hist.get("oneWeekAgo") else None
+        one_month = float(hist.get("oneMonthAgo", score)) if hist.get("oneMonthAgo") else None
+        one_year = float(hist.get("oneYearAgo", score)) if hist.get("oneYearAgo") else None
+
+        return {
+            "score": score,
+            "rating": rating,
+            "timestamp": timestamp,
+            "previous_close": prev_close,
+            "one_week_ago": one_week,
+            "one_month_ago": one_month,
+            "one_year_ago": one_year,
+            "source_url": "https://edition.cnn.com/markets/fear-and-greed",
+            "fetch_success": True,
+        }
+    except Exception as e:
+        print(f"Error fetching CNN Fear & Greed: {e}")
+        return None
+
+
+def classify_fear_greed(score):
+    """
+    直覺分級對照：
+    0-24:  深綠 → Extreme Fear → 逢低佈局機會
+    25-44: 綠黃 → Fear → 觀望偏多
+    45-54: 黃燈 → Neutral → 觀望為主
+    55-74: 橙燈 → Greed → 減碼觀望
+    75-100: 深紅 → Extreme Greed → 減碼或保守
+    """
+    if score <= 24:
+        return {"label": "Extreme Fear", "emoji": "🟢", "color": "#166534",
+                "action": "逢低佈局機會", "action_short": "買點"}
+    elif score <= 44:
+        return {"label": "Fear", "emoji": "🟡", "color": "#65A30D",
+                "action": "觀望偏多", "action_short": "觀望"}
+    elif score <= 54:
+        return {"label": "Neutral", "emoji": "🟡", "color": "#CA8A04",
+                "action": "觀望為主", "action_short": "觀望"}
+    elif score <= 74:
+        return {"label": "Greed", "emoji": "🟠", "color": "#EA580C",
+                "action": "減碼觀望", "action_short": "減碼"}
+    else:
+        return {"label": "Extreme Greed", "emoji": "🔴", "color": "#991B1B",
+                "action": "減碼或保守", "action_short": "減碼"}
+
+
+def evaluate_sentiment_cross(fg_score, vix_val, cpi_yoy, rate_val, spread_val):
+    """
+    CNN 情緒 vs 現有四大指標交叉驗證，產生情緒確認訊息。
+    作為「頂層情緒確認層」，不直接覆蓋買賣決策。
+    """
+    cross_results = []
+
+    # --- CNN vs VIX ---
+    if fg_score <= 24 and vix_val >= 30:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "📈 強烈買入訊號",
+            "detail": "Extreme Fear + VIX 高：情緒恐慌，逢低佈局核心持股機會"})
+    elif fg_score >= 75 and vix_val < 20:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "📉 強烈防守訊號",
+            "detail": "Extreme Greed + VIX 低：風險加劇，建議提高防守資產、降低股票比重"})
+    elif fg_score <= 44 and vix_val >= 25:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "⚠️ 偏防守",
+            "detail": "Fear + VIX 偏高：市場緊張，注意防禦但留意反彈訊號"})
+    elif fg_score >= 55 and vix_val < 15:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "🟠 注意回調",
+            "detail": "Greed + VIX 極低：市場過於自滿，注意回調風險"})
+    else:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "ℹ️ 中性",
+            "detail": f"CNN {fg_score:.0f} vs VIX {vix_val:.1f}：無極端衝突"})
+
+    # --- CNN vs CPI ---
+    if fg_score >= 75 and cpi_yoy > 3.5:
+        cross_results.append({"pair": "CNN vs CPI", "signal": "🔴 泡沫警示",
+            "detail": "Extreme Greed + 高通膨：泡沫風險，建議保守配置"})
+    elif fg_score <= 24 and cpi_yoy < 2.5:
+        cross_results.append({"pair": "CNN vs CPI", "signal": "🟢 逢低進場",
+            "detail": "Extreme Fear + 低通膨：基本面支撐下的恐慌超賣，進場機會"})
+    else:
+        cross_results.append({"pair": "CNN vs CPI", "signal": "ℹ️ 中性",
+            "detail": f"CNN {fg_score:.0f} vs CPI {cpi_yoy:.2f}%：無極端衝突"})
+
+    # --- CNN vs 利率 ---
+    if fg_score >= 75 and rate_val > 5.0:
+        cross_results.append({"pair": "CNN vs 利率", "signal": "🔴 風險偏高",
+            "detail": "Extreme Greed + 高利率：資金成本高且情緒過熱，風險偏高"})
+    elif fg_score <= 24 and rate_val < 3.0:
+        cross_results.append({"pair": "CNN vs 利率", "signal": "🟢 逢低機會",
+            "detail": "Extreme Fear + 低利率：寬鬆環境下的恐慌，逢低機會"})
+    else:
+        cross_results.append({"pair": "CNN vs 利率", "signal": "ℹ️ 中性",
+            "detail": f"CNN {fg_score:.0f} vs Rate {rate_val:.2f}%：無極端衝突"})
+
+    # --- CNN vs Spread ---
+    if fg_score >= 75 and spread_val < 0:
+        cross_results.append({"pair": "CNN vs Spread", "signal": "🔴 極度警戒",
+            "detail": "Extreme Greed + 殖利率倒掛：衰退風險與貪婪並存，極度警戒"})
+    elif fg_score <= 24 and spread_val > 1.0:
+        cross_results.append({"pair": "CNN vs Spread", "signal": "🟢 超賣機會",
+            "detail": "Extreme Fear + 正常利差：經濟結構正常下的恐慌超賣"})
+    else:
+        cross_results.append({"pair": "CNN vs Spread", "signal": "ℹ️ 中性",
+            "detail": f"CNN {fg_score:.0f} vs Spread {spread_val:.2f}：無極端衝突"})
+
+    # 綜合訊息
+    strong_buy = sum(1 for r in cross_results if "🟢" in r["signal"])
+    strong_sell = sum(1 for r in cross_results if "🔴" in r["signal"] or "📉" in r["signal"])
+    if strong_buy >= 2:
+        summary = "📈 多重指標確認：恐慌超賣，逢低佈局核心持股機會"
+    elif strong_sell >= 2:
+        summary = "📉 多重指標確認：風險加劇，建議提高防守資產、降低股票比重"
+    elif strong_buy == 1:
+        summary = "⚠️ 部分指標顯示買入訊號，但仍需觀察其他確認"
+    elif strong_sell == 1:
+        summary = "⚠️ 部分指標顯示防守訊號，但仍需觀察其他確認"
+    else:
+        summary = "ℹ️ CNN 情緒與現有指標無極端衝突，維持現有判斷"
+
+    return cross_results, summary
+
+
 # 下載資料
 df_close, df_vol, df_low = fetch_system_data()
 df_macro, df_vix, pmi_info, cpi_nowcast_info = fetch_macro_data()
+cnn_fg_data = fetch_cnn_fear_greed()
 
 # --- 3. 側邊欄：個人化參數與 PMI 趨勢判斷 ---
 st.sidebar.header("👤 1. 個人化參數")
@@ -363,6 +501,33 @@ with st.sidebar.expander("📚 PMI 趨勢判斷原理", expanded=False):
 不符合以上條件，例如 V 型反彈只視為震盪，不視為真正上升。
 """
     )
+
+st.sidebar.divider()
+st.sidebar.header("📌 4. CNN Fear & Greed")
+st.sidebar.markdown(
+    "[🔗 CNN Fear & Greed Index](https://edition.cnn.com/markets/fear-and-greed)"
+)
+if cnn_fg_data is not None and cnn_fg_data.get("fetch_success"):
+    fg_score_default = float(cnn_fg_data["score"])
+    fg_class = classify_fear_greed(fg_score_default)
+    st.sidebar.success(
+        f"已自動抓取 CNN Fear & Greed：{fg_class['emoji']} {fg_score_default:.0f} ({fg_class['label']})"
+    )
+    st.sidebar.caption(
+        f"資料來源：[CNN Fear & Greed Index]({cnn_fg_data['source_url']})"
+    )
+else:
+    fg_score_default = 50.0
+    st.sidebar.warning("CNN Fear & Greed 自動抓取失敗，請手動輸入數值。")
+
+fg_score_input = st.sidebar.number_input(
+    "CNN F&G 分數（0-100，可覆寫）", min_value=0.0, max_value=100.0,
+    value=fg_score_default, step=1.0
+)
+fg_classification = classify_fear_greed(fg_score_input)
+st.sidebar.info(
+    f"CNN 情緒判斷：{fg_classification['emoji']} {fg_classification['label']}｜建議：{fg_classification['action']}"
+)
 
 # --- 4. 技術指標與核心函數 ---
 def find_ftd_event(close_s, vol_s):
@@ -1363,7 +1528,7 @@ if view_mode in ["Pro", "Master"]:
         st.metric(pce_actual_label, f"{core_pce_actual_yoy:.2f}%" if core_pce_actual_yoy is not None else "N/A")
     if cpi_nowcast_info is not None:
         st.caption(f"Nowcast 來源：[{cpi_nowcast_info['source_label']}]({cpi_nowcast_info['source_url']})｜更新時間：{cpi_nowcast_info.get('updated_at', 'N/A')}｜下方 gauge / 歷史圖 / 原始資料列表皆使用 FRED 官方歷史序列")
-    g1, g2, g3, g4 = st.columns(4)
+    g1, g2, g3, g4, g5 = st.columns(5)
     with g1:
         steps = [{"range": [0, 2], "color": "#A7F3D0"}, {"range": [2, 3], "color": "#FDE68A"}, {"range": [3, 10], "color": "#FECACA"}]
         st.plotly_chart(create_gauge(cpi_actual_yoy, f"CPI YoY 通膨<br><span style='font-size:11px;color:gray'>來源: FRED｜趨勢: {cpi_t}</span>", 0, 8, steps), use_container_width=True)
@@ -1376,6 +1541,20 @@ if view_mode in ["Pro", "Master"]:
     with g4:
         steps = [{"range": [0, 15], "color": "#BFDBFE"}, {"range": [15, 20], "color": "#A7F3D0"}, {"range": [20, 30], "color": "#FDE68A"}, {"range": [30, 60], "color": "#FECACA"}]
         st.plotly_chart(create_gauge(vix_latest, "VIX 恐慌指數", 0, 60, steps, suffix=""), use_container_width=True)
+    with g5:
+        fg_steps = [
+            {"range": [0, 25], "color": "#166534"},
+            {"range": [25, 45], "color": "#65A30D"},
+            {"range": [45, 55], "color": "#CA8A04"},
+            {"range": [55, 75], "color": "#EA580C"},
+            {"range": [75, 100], "color": "#991B1B"},
+        ]
+        fg_delta_ref = cnn_fg_data["previous_close"] if cnn_fg_data is not None else None
+        st.plotly_chart(create_gauge(
+            fg_score_input,
+            f"CNN Fear & Greed<br><span style='font-size:11px;color:gray'>{fg_classification['emoji']} {fg_classification['label']}｜{fg_classification['action_short']}</span>",
+            0, 100, fg_steps, suffix="", ref=fg_delta_ref
+        ), use_container_width=True)
 
     with st.expander("📈 查看各指標歷史趨勢圖及原始資料列表"):
         if df_macro is not None and cpi_yoy_series is not None:
@@ -1401,6 +1580,95 @@ if view_mode in ["Pro", "Master"]:
             st.dataframe(display_df.tail(10).sort_index(ascending=False), use_container_width=True)
         else:
             st.warning("目前使用手動輸入模式，無歷史數據可顯示。")
+
+    # --- 📌 市場情緒錶：CNN Fear & Greed ---
+    st.divider()
+    st.subheader("📌 市場情緒錶：CNN Fear & Greed")
+
+    # 計算交叉驗證
+    fg_cross_results, fg_cross_summary = evaluate_sentiment_cross(
+        fg_score_input, vix_latest, cpi_actual_yoy, rate_val, spread_val
+    )
+
+    fg_mc1, fg_mc2, fg_mc3 = st.columns(3)
+    with fg_mc1:
+        fg_delta_val = fg_score_input - cnn_fg_data["previous_close"] if cnn_fg_data is not None else None
+        st.metric(
+            f"{fg_classification['emoji']} CNN Fear & Greed",
+            f"{fg_score_input:.0f} ({fg_classification['label']})",
+            delta=f"{fg_delta_val:+.0f} vs 昨日" if fg_delta_val is not None else None,
+        )
+    with fg_mc2:
+        st.metric(
+            "建議動作",
+            fg_classification["action_short"],
+            delta=fg_classification["action"],
+            delta_color="off",
+        )
+    with fg_mc3:
+        st.metric(
+            "情緒確認層",
+            fg_cross_summary[:20] + "..." if len(fg_cross_summary) > 20 else fg_cross_summary,
+        )
+        st.caption(fg_cross_summary)
+
+    # 歷史參考
+    if cnn_fg_data is not None:
+        fg_hist_cols = st.columns(4)
+        hist_data = [
+            ("昨日收盤", cnn_fg_data.get("previous_close")),
+            ("一週前", cnn_fg_data.get("one_week_ago")),
+            ("一月前", cnn_fg_data.get("one_month_ago")),
+            ("一年前", cnn_fg_data.get("one_year_ago")),
+        ]
+        for col, (label, val) in zip(fg_hist_cols, hist_data):
+            if val is not None:
+                hist_cls = classify_fear_greed(val)
+                col.metric(label, f"{val:.0f}", delta=f"{hist_cls['emoji']} {hist_cls['label']}")
+            else:
+                col.metric(label, "N/A")
+
+    # 狀態說明表
+    st.markdown("**直覺分級對照表**")
+    fg_ref_df = pd.DataFrame([
+        {"分數區間": "0 - 24", "燈號": "🟢 深綠", "分類": "Extreme Fear", "建議": "逢低佈局機會（買點）"},
+        {"分數區間": "25 - 44", "燈號": "🟡 綠黃", "分類": "Fear", "建議": "觀望偏多"},
+        {"分數區間": "45 - 54", "燈號": "🟡 黃燈", "分類": "Neutral", "建議": "觀望為主"},
+        {"分數區間": "55 - 74", "燈號": "🟠 橙燈", "分類": "Greed", "建議": "減碼觀望"},
+        {"分數區間": "75 - 100", "燈號": "🔴 深紅", "分類": "Extreme Greed", "建議": "減碼或保守（減碼）"},
+    ])
+    st.dataframe(fg_ref_df, use_container_width=True, hide_index=True)
+
+    # 交叉對照摘要表
+    st.markdown("**情緒交叉對照（CNN vs 現有指標）**")
+    fg_cross_df = pd.DataFrame(fg_cross_results)
+    fg_cross_df.columns = ["對照組", "訊號", "說明"]
+    st.dataframe(fg_cross_df, use_container_width=True, hide_index=True)
+
+    # 建議訊息模板
+    with st.expander("📋 情緒確認層建議訊息模板", expanded=False):
+        st.markdown(
+            """
+**Extreme Greed + VIX 低：**
+> 📉 風險加劇，建議提高防守資產、降低股票比重
+
+**Extreme Fear + VIX 高：**
+> 📈 情緒恐慌，逢低佈局核心持股機會
+
+**Extreme Greed + 高通膨：**
+> 🔴 泡沫風險，建議保守配置
+
+**Extreme Fear + 低通膨：**
+> 🟢 基本面支撐下的恐慌超賣，進場機會
+
+**Extreme Greed + 殖利率倒掛：**
+> 🔴 衰退風險與貪婪並存，極度警戒
+            """
+        )
+    if cnn_fg_data is not None:
+        st.caption(f"資料來源：[CNN Fear & Greed Index]({cnn_fg_data['source_url']})")
+    else:
+        st.caption("⚠️ CNN 資料抓取失敗，目前使用手動輸入值。")
 
 
 if view_mode == "Master":
@@ -1582,6 +1850,8 @@ if view_mode in ["Pro", "Master"]:
             "Rate",
             "BLS/FRED Clock Phase",
             "Cleveland Fed Clock Phase",
+            "CNN Fear & Greed",
+            "CNN 情緒確認層",
             "FTD Guard",
             "Bond Protection",
             "Inflation Surprise",
@@ -1599,6 +1869,8 @@ if view_mode in ["Pro", "Master"]:
             macro_background_bls["Rate"],
             macro_background_bls["phase"],
             macro_background_nowcast["phase"],
+            f"{fg_classification['emoji']} {fg_score_input:.0f} ({fg_classification['label']})",
+            fg_cross_summary,
             ftd_msg,
             "ON" if bond_protection_on else "OFF",
             f"{inflation_surprise_label}｜{inflation_surprise:+.2f}%",
@@ -1616,6 +1888,8 @@ if view_mode in ["Pro", "Master"]:
             f"{macro_background_bls['Rate']}｜利率方向影響五燈號判斷。",
             f"{macro_background_bls['phase']}｜依據 PMI={macro_background_bls['PMI']}、CPI={cpi_actual_yoy:.2f}%({cpi_t})、Core PCE={bls_core_pce_yoy:.2f}%({core_pce_t})、Rate={macro_background_bls['Rate']} 綜合判斷｜原因：{macro_background_bls['phase_rule']}",
             f"{macro_background_nowcast['phase']}｜依據 PMI={macro_background_nowcast['PMI']}、CPI={cleveland_cpi_yoy:.2f}%({cpi_t})、Core PCE={cleveland_core_pce_yoy:.2f}%({core_pce_t})、Rate={macro_background_nowcast['Rate']} 綜合判斷｜原因：{macro_background_nowcast['phase_rule']}",
+            f"{fg_classification['emoji']} {fg_score_input:.0f} ({fg_classification['label']})｜CNN Fear & Greed 作為頂層情緒確認指標。建議：{fg_classification['action']}",
+            f"{fg_cross_summary}｜CNN 情緒 vs VIX/CPI/Rate/Spread 交叉驗證結果。",
             f"{ftd_msg}｜FTD Guard 失效時會優先壓抑風險承擔。",
             f"{'ON' if bond_protection_on else 'OFF'}｜高通膨/升息/偏熱 surprise 時，債券權重可能由現金承接。",
             f"{inflation_surprise_label}｜{inflation_surprise:+.2f}%｜若不足以單一判定燈號，需觀察後續月份。",
