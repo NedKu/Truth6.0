@@ -811,7 +811,13 @@ def calc_truth_alloc(age_val, ytr_val, mode_label, bond_protection_on, ftd_confi
     中樞 60% / 動態範圍 50-80% / 10% 生存金強制鎖定
     """
     # 1. 決定股票中樞 (Pivot) - 階梯式 Glide Path
-    if ytr_val > 10:
+    if ytr_val >= 25:      # 距退休 > 25 年 (年輕人)
+        pivot_stock = 85.0
+    elif ytr_val >= 20:    # 距退休 20-25 年
+        pivot_stock = 80.0
+    elif ytr_val >= 15:    # 距退休 15-20 年
+        pivot_stock = 70.0
+    elif ytr_val > 10:     # 距退休 10-15 年 (中生代)
         pivot_stock = 60.0
     elif ytr_val > 5:
         pivot_stock = 55.0
@@ -823,7 +829,14 @@ def calc_truth_alloc(age_val, ytr_val, mode_label, bond_protection_on, ftd_confi
     # 基礎配置固定 (辯論共識：10% 黃金, 10% 現金)
     base_gold = 10.0
     base_cash = 10.0
-    base_bond = 100.0 - pivot_stock - base_gold - base_cash
+    
+    # 處理年輕人高股票中樞導致的空間擠壓，避免 base_bond 變成負數
+    if pivot_stock + base_gold + base_cash > 100.0:
+        excess = pivot_stock + base_gold + base_cash - 100.0
+        base_gold = max(0.0, base_gold - excess) # 黃金優先讓出空間
+        base_bond = 0.0
+    else:
+        base_bond = 100.0 - pivot_stock - base_gold - base_cash
     
     # 2. 市場模式偏移 (Tactical Tilt)
     # 計算年齡壓縮係數 (Age Compression)，用於平時的 Tilt 縮放
@@ -842,17 +855,21 @@ def calc_truth_alloc(age_val, ytr_val, mode_label, bond_protection_on, ftd_confi
             tilt_reason = "Caution (FTD Amnesty)"
     
     # 3. 動態風險上限 (Dynamic Risk Cap)
-    safe_cap = min(100.0 - age_val, 50.0 + ytr_val)
+    # 年輕人適用較寬鬆的上限，中老年後依據 100-age 遞減
+    age_limit = 100.0 - age_val
+    ytr_limit = 50.0 + ytr_val
+    safe_cap = min(age_limit, ytr_limit)
     
     if drawdown_val <= -20:
-        # 🔴 掠食者模式：危機時上限釋放至 80%
-        max_stock = 80.0
+        # 🔴 掠食者模式：危機時上限釋放 (最高 90%，需留 10% 現金)
+        max_stock = 90.0 - base_gold
         mode_state = "🔴 掠食者模式 (上限釋放)"
         # 危機時不執行 age_compression 限制，允許直接加碼至上限
         if "Crisis" in mode_label:
             regime_tilt = 10.0 
     else:
-        # 🟢 守成模式：嚴格限額 (平時 60% 左右)
+        # 🟢 守成模式：不再強制用 min(pivot, safe_cap)，而是允許 pivot 達到 safe_cap
+        # 這樣 25 歲的人可以持有 pivot 的 85%，或受限於 safe_cap 的 75%
         max_stock = min(pivot_stock, safe_cap)
         mode_state = "🟢 守成模式 (嚴格限額)"
 
