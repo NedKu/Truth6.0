@@ -1606,11 +1606,17 @@ if view_mode in ["Pro", "Master"]:
             delta_color="off",
         )
     with fg_mc3:
+        # 將長文字轉換為簡短的狀態標籤，保持排版整潔
+        short_status = "ℹ️ 維持判斷"
+        if "📈" in fg_cross_summary: short_status = "📈 強烈買點"
+        elif "📉" in fg_cross_summary: short_status = "📉 強烈防禦"
+        elif "⚠️" in fg_cross_summary: short_status = "⚠️ 需再觀察"
+
         st.metric(
             "情緒確認層",
-            fg_cross_summary[:20] + "..." if len(fg_cross_summary) > 20 else fg_cross_summary,
+            short_status,
+            help=fg_cross_summary  # 將完整訊息放入 Hover 提示框中
         )
-        st.caption(fg_cross_summary)
 
     # 歷史參考
     if cnn_fg_data is not None:
@@ -1628,41 +1634,43 @@ if view_mode in ["Pro", "Master"]:
             else:
                 col.metric(label, "N/A")
 
-    # 狀態說明表
-    st.markdown("**直覺分級對照表**")
-    fg_ref_df = pd.DataFrame([
-        {"分數區間": "0 - 24", "燈號": "🟢 深綠", "分類": "Extreme Fear", "建議": "逢低佈局機會（買點）"},
-        {"分數區間": "25 - 44", "燈號": "🟡 綠黃", "分類": "Fear", "建議": "觀望偏多"},
-        {"分數區間": "45 - 54", "燈號": "🟡 黃燈", "分類": "Neutral", "建議": "觀望為主"},
-        {"分數區間": "55 - 74", "燈號": "🟠 橙燈", "分類": "Greed", "建議": "減碼觀望"},
-        {"分數區間": "75 - 100", "燈號": "🔴 深紅", "分類": "Extreme Greed", "建議": "減碼或保守（減碼）"},
-    ])
-    st.dataframe(fg_ref_df, use_container_width=True, hide_index=True)
-
-    # 交叉對照摘要表
+    # 交叉對照摘要表 (顯示當前的對照結果)
     st.markdown("**情緒交叉對照（CNN vs 現有指標）**")
     fg_cross_df = pd.DataFrame(fg_cross_results)
     fg_cross_df.columns = ["對照組", "訊號", "說明"]
     st.dataframe(fg_cross_df, use_container_width=True, hide_index=True)
 
-    # 建議訊息模板
-    with st.expander("📋 情緒確認層建議訊息模板", expanded=False):
+    # 判斷機制與對照表 (收納至 Expander)
+    with st.expander("📋 情緒確認層詳細判斷機制與對照表", expanded=False):
+        st.markdown("#### 直覺分級對照表")
+        fg_ref_df = pd.DataFrame([
+            {"分數區間": "0 - 24", "燈號": "🟢 深綠", "分類": "Extreme Fear", "建議": "逢低佈局機會（買點）"},
+            {"分數區間": "25 - 44", "燈號": "🟡 綠黃", "分類": "Fear", "建議": "觀望偏多"},
+            {"分數區間": "45 - 54", "燈號": "🟡 黃燈", "分類": "Neutral", "建議": "觀望為主"},
+            {"分數區間": "55 - 74", "燈號": "🟠 橙燈", "分類": "Greed", "建議": "減碼觀望"},
+            {"分數區間": "75 - 100", "燈號": "🔴 深紅", "分類": "Extreme Greed", "建議": "減碼或保守（減碼）"},
+        ])
+        st.dataframe(fg_ref_df, use_container_width=True, hide_index=True)
+
         st.markdown(
             """
-**Extreme Greed + VIX 低：**
-> 📉 風險加劇，建議提高防守資產、降低股票比重
+#### 交叉對照判斷機制
 
-**Extreme Fear + VIX 高：**
-> 📈 情緒恐慌，逢低佈局核心持股機會
+**【CNN vs VIX 波動率】**
+- **Extreme Fear + VIX 高 (>= 30)：** 📈 情緒恐慌，逢低佈局核心持股機會
+- **Extreme Greed + VIX 低 (< 20)：** 📉 風險加劇，建議提高防守資產、降低股票比重
 
-**Extreme Greed + 高通膨：**
-> 🔴 泡沫風險，建議保守配置
+**【CNN vs CPI 通膨】**
+- **Extreme Greed + 高通膨 (> 3.5%)：** 🔴 泡沫風險，建議保守配置
+- **Extreme Fear + 低通膨 (< 2.5%)：** 🟢 基本面支撐下的恐慌超賣，進場機會
 
-**Extreme Fear + 低通膨：**
-> 🟢 基本面支撐下的恐慌超賣，進場機會
+**【CNN vs 利率】**
+- **Extreme Greed + 高利率 (> 5.0%)：** 🔴 資金成本高且情緒過熱，風險偏高
+- **Extreme Fear + 低利率 (< 3.0%)：** 🟢 寬鬆環境下的恐慌，逢低機會
 
-**Extreme Greed + 殖利率倒掛：**
-> 🔴 衰退風險與貪婪並存，極度警戒
+**【CNN vs Spread 利差】**
+- **Extreme Greed + 殖利率倒掛 (< 0)：** 🔴 衰退風險與貪婪並存，極度警戒
+- **Extreme Fear + 正常利差 (> 1.0)：** 🟢 經濟結構正常下的恐慌超賣
             """
         )
     if cnn_fg_data is not None:
