@@ -788,7 +788,7 @@ def create_drawdown_gauge(ticker, label, df):
         )
 
     data = df[ticker].dropna()
-    if data.empty:
+    if data.empty or len(data) == 0:
         return create_gauge(
             0,
             f"{label} - No data",
@@ -808,11 +808,35 @@ def create_drawdown_gauge(ticker, label, df):
             suffix="%",
         )
 
-    curr = data.iloc[-1]
-    high = data.tail(252).max()
-    ma200 = data.rolling(200).mean().iloc[-1]
-    dd = (curr - high) / high * 100 if high else 0.0
-    ma200_rel = (ma200 - high) / high * 100 if high else 0.0
+    try:
+        curr = data.iloc[-1]
+        high = data.tail(252).max()
+        ma200_series = data.rolling(200).mean().dropna()
+        if ma200_series.empty:
+            ma200 = curr
+        else:
+            ma200 = ma200_series.iloc[-1]
+        dd = (curr - high) / high * 100 if high and not pd.isna(high) else 0.0
+        ma200_rel = (ma200 - high) / high * 100 if high and not pd.isna(high) and not pd.isna(ma200) else 0.0
+    except (IndexError, KeyError):
+        return create_gauge(
+            0,
+            f"{label} - No data",
+            -60,
+            5,
+            [
+                {"range": [-50, -40], "color": "#7F1D1D"},
+                {"range": [-40, -35], "color": "#991B1B"},
+                {"range": [-35, -30], "color": "#B91C1C"},
+                {"range": [-30, -25], "color": "#DC2626"},
+                {"range": [-25, -20], "color": "#EF4444"},
+                {"range": [-20, -15], "color": "#F97316"},
+                {"range": [-15, -10], "color": "#F59E0B"},
+                {"range": [-10, -5], "color": "#EAB308"},
+                {"range": [-5, 0], "color": "#84CC16"},
+            ],
+            suffix="%",
+        )
 
     steps = [
         {"range": [-50, -40], "color": "#7F1D1D"},
