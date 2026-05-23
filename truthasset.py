@@ -104,6 +104,13 @@ def fetch_system_data():
 def fetch_macro_data():
     end = datetime.now()
     start = end - timedelta(days=730)
+    
+    macro_df = None
+    vix_df = None
+    pmi_info = None
+    cpi_nowcast_info = None
+
+    # 1. Fetch FRED Data
     try:
         metrics = {
             "CPI": "CPIAUCSL",
@@ -121,12 +128,20 @@ def fetch_macro_data():
 
         macro_df = pd.concat(dfs, axis=1, sort=False)
         macro_df.columns = list(metrics.keys())
+    except Exception as e:
+        print(f"Error fetching FRED data: {e}")
 
+    # 2. Fetch VIX Data
+    try:
         vix_df = yf.download("^VIX", start=start, end=end, progress=False, auto_adjust=False)["Close"]
         if isinstance(vix_df, pd.DataFrame):
             vix_df = vix_df.iloc[:, 0]
         vix_df = vix_df.dropna()
+    except Exception as e:
+        print(f"Error fetching VIX data: {e}")
 
+    # 3. Fetch PMI Data
+    try:
         pmi_url = "https://tradingeconomics.com/united-states/manufacturing-pmi"
         pmi_resp = requests.get(pmi_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         pmi_resp.raise_for_status()
@@ -136,7 +151,6 @@ def fetch_macro_data():
             pmi_html,
         )
 
-        pmi_info = None
         if pmi_match:
             current_val = float(pmi_match.group(1))
             current_month = pmi_match.group(2)
@@ -154,100 +168,258 @@ def fetch_macro_data():
                 "reference_url": "https://www.ismworld.org/",
                 "reference_label": "ISM 官網（人工參考）",
             }
+    except Exception as e:
+        print(f"Error fetching PMI data: {e}")
 
+    # 4. Fetch Cleveland Fed Nowcast
+    try:
         nowcast_page_url = "https://www.clevelandfed.org/indicators-and-data/inflation-nowcasting"
         nowcast_resp = requests.get(nowcast_page_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         nowcast_resp.raise_for_status()
         nowcast_html = nowcast_resp.text
 
+        # 更加彈性的 Regex，處理可能的大小寫或屬性
         yoy_table_match = re.search(
-            r"<caption>\s*Inflation, year-over-year percent change\s*</caption>.*?<tbody>(.*?)</tbody>",
+            r"<caption[^>]*>.*?Inflation, year-over-year percent change.*?</caption>.*?<tbody>(.*?)</tbody>",
             nowcast_html,
             re.IGNORECASE | re.DOTALL,
         )
-        if not yoy_table_match:
-            raise ValueError("Cleveland Fed YoY table not found")
+        if yoy_table_match:
+            row_matches = re.findall(r"<tr>(.*?)</tr>", yoy_table_match.group(1), re.IGNORECASE | re.DOTALL)
+            yoy_rows = []
+            for row_html in row_matches:
+                cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, re.IGNORECASE | re.DOTALL)
+                cleaned_cells = [re.sub(r"<.*?>", "", cell).replace("&nbsp;", " ").strip() for cell in cells]
+                if len(cleaned_cells) >= 6:
+                    yoy_rows.append({
+                        "month": cleaned_cells[0],
+                        "cpi": cleaned_cells[1],
+                        "core_cpi": cleaned_cells[2],
+                        "pce": cleaned_cells[3],
+                        "core_pce": cleaned_cells[4],
+                        "updated": cleaned_cells[5],
+                    })
 
-        row_matches = re.findall(r"<tr>(.*?)</tr>", yoy_table_match.group(1), re.IGNORECASE | re.DOTALL)
-        yoy_rows = []
-        for row_html in row_matches:
-            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, re.IGNORECASE | re.DOTALL)
-            cleaned_cells = [re.sub(r"<.*?>", "", cell).replace("&nbsp;", " ").strip() for cell in cells]
-            if len(cleaned_cells) >= 6:
-                yoy_rows.append({
-                    "month": cleaned_cells[0],
-                    "cpi": cleaned_cells[1],
-                    "core_cpi": cleaned_cells[2],
-                    "pce": cleaned_cells[3],
-                    "core_pce": cleaned_cells[4],
-                    "updated": cleaned_cells[5],
-                })
+            def parse_pct(val):
+                if val in (None, "", "—", "-", " "):
+                    return None
+                try:
+                    return float(str(val).replace("%", "").strip())
+                except ValueError:
+                    return None
 
-        yoy_rows = [row for row in yoy_rows if row["month"]]
-        if not yoy_rows:
-            raise ValueError("Cleveland Fed YoY table has no usable rows")
+            def parse_month_label(month_text):
+                try:
+                    return datetime.strptime(month_text.strip(), "%B %Y")
+                except Exception:
+                    return datetime.min
 
-        def parse_pct(val):
-            if val in (None, "", "—", "-"):
-                return None
-            return float(str(val).replace("%", "").strip())
+            # 過濾掉完全沒有數據的行（例如未來月份預留位）
+            valid_rows = [row for row in yoy_rows if parse_pct(row["cpi"]) is not None or parse_pct(row["core_pce"]) is not None]
+            
+            if valid_rows:
+                valid_rows = sorted(valid_rows, key=lambda row: parse_month_label(row["month"]))
+                latest_row = valid_rows[-1]
+                
+                # 尋找有核心數據的最新行
+                latest_cpi_row = next((r for r in reversed(valid_rows) if parse_pct(r["cpi"]) is not None), latest_row)
+                latest_core_pce_row = next((r for r in reversed(valid_rows) if parse_pct(r["core_pce"]) is not None), latest_row)
+                
+                # 尋找前一個月份
+                previous_rows = [r for r in valid_rows if parse_month_label(r["month"]) < parse_month_label(latest_row["month"])]
+                prev_row = previous_rows[-1] if previous_rows else latest_row
 
-        def parse_month_label(month_text):
-            try:
-                return datetime.strptime(month_text.strip(), "%B %Y")
-            except Exception:
-                return datetime.min
+                # 計算 FRED 實際值的同比 (YoY)
+                cpi_actual_yoy = None
+                pce_core_actual_yoy = None
+                cpi_actual_label = None
+                pce_core_actual_label = None
+                cpi_prev_actual_mom = None
+                pce_prev_actual_mom = None
 
-        yoy_rows = sorted(yoy_rows, key=lambda row: parse_month_label(row["month"]))
-        latest_yoy_row = max(yoy_rows, key=lambda row: parse_month_label(row["month"]))
-        latest_cpi_row = latest_yoy_row
-        previous_rows = [row for row in yoy_rows if parse_month_label(row["month"]) < parse_month_label(latest_yoy_row["month"])]
-        previous_cpi_row = max(previous_rows, key=lambda row: parse_month_label(row["month"])) if previous_rows else latest_yoy_row
-        latest_core_pce_row = latest_yoy_row
+                if macro_df is not None:
+                    cpi_series = macro_df["CPI"].dropna()
+                    core_pce_series = macro_df["CorePCE"].dropna()
+                    
+                    if len(cpi_series) >= 13:
+                        cpi_actual_yoy_series = ((cpi_series / cpi_series.shift(12)) - 1) * 100
+                        cpi_actual_yoy = float(cpi_actual_yoy_series.iloc[-1])
+                        cpi_actual_label = cpi_actual_yoy_series.index[-1].strftime("%Y-%m")
+                        cpi_mom = ((cpi_series / cpi_series.shift(1)) - 1) * 100
+                        cpi_prev_actual_mom = float(cpi_mom.iloc[-1])
+                        
+                    if len(core_pce_series) >= 13:
+                        core_pce_yoy_series = ((core_pce_series / core_pce_series.shift(12)) - 1) * 100
+                        pce_core_actual_yoy = float(core_pce_yoy_series.iloc[-1])
+                        pce_core_actual_label = core_pce_yoy_series.index[-1].strftime("%Y-%m")
+                        pce_mom = ((core_pce_series / core_pce_series.shift(1)) - 1) * 100
+                        pce_prev_actual_mom = float(pce_mom.iloc[-1])
 
-        cpi_series = macro_df["CPI"].dropna()
-        core_pce_series = macro_df["CorePCE"].dropna()
-        cpi_actual_yoy_series = ((cpi_series / cpi_series.shift(12)) - 1).dropna() * 100
-        core_pce_actual_yoy_series = ((core_pce_series / core_pce_series.shift(12)) - 1).dropna() * 100
-        cpi_actual_mom = ((cpi_series / cpi_series.shift(1)) - 1) * 100 if len(cpi_series) >= 2 else pd.Series(dtype=float)
-        core_pce_actual_mom = ((core_pce_series / core_pce_series.shift(1)) - 1) * 100 if len(core_pce_series) >= 2 else pd.Series(dtype=float)
+                cpi_nowcast_info = {
+                    "source_url": nowcast_page_url,
+                    "source_label": "Cleveland Fed｜Inflation Nowcasting",
+                    "updated_at": latest_row["updated"],
+                    "cpi_yoy_current": parse_pct(latest_cpi_row["cpi"]),
+                    "cpi_yoy_label": latest_cpi_row["month"],
+                    "cpi_yoy_prev": parse_pct(prev_row["cpi"]),
+                    "cpi_actual_yoy": cpi_actual_yoy,
+                    "cpi_actual_label": cpi_actual_label,
+                    "pce_core_yoy_nowcast": parse_pct(latest_core_pce_row["core_pce"]),
+                    "pce_core_yoy_label": latest_core_pce_row["month"],
+                    "pce_core_yoy_actual": pce_core_actual_yoy,
+                    "pce_core_actual_label": pce_core_actual_label,
+                    "cpi_mom_nowcast": None,  # 從 YoY 表格難以直接提取 MoM
+                    "pce_core_mom_nowcast": None,
+                    "cpi_prev_actual_mom": cpi_prev_actual_mom,
+                    "pce_prev_actual_mom": pce_prev_actual_mom,
+                }
+    except Exception as e:
+        print(f"Error fetching Cleveland Fed data: {e}")
 
-        cpi_series_values = []
-        cpi_series_index = []
-        for row in yoy_rows:
-            cpi_val = parse_pct(row["cpi"])
-            if cpi_val is not None:
-                cpi_series_values.append(cpi_val)
-                cpi_series_index.append(row["month"])
+    return macro_df, vix_df, pmi_info, cpi_nowcast_info
 
-        cpi_nowcast_info = {
-            "source_url": nowcast_page_url,
-            "source_label": "Cleveland Fed｜Inflation Nowcasting YoY Table",
-            "updated_at": latest_yoy_row["updated"],
-            "cpi_yoy_current": parse_pct(latest_cpi_row["cpi"]) if latest_cpi_row else None,
-            "cpi_yoy_label": latest_cpi_row["month"] if latest_cpi_row else latest_yoy_row["month"],
-            "cpi_yoy_prev": parse_pct(previous_cpi_row["cpi"]) if previous_cpi_row else (parse_pct(latest_cpi_row["cpi"]) if latest_cpi_row else None),
-            "cpi_actual_yoy": float(cpi_actual_yoy_series.iloc[-1]) if not cpi_actual_yoy_series.empty else None,
-            "cpi_actual_label": cpi_actual_yoy_series.index[-1].strftime("%Y-%m") if not cpi_actual_yoy_series.empty else None,
-            "pce_core_yoy_nowcast": parse_pct(latest_core_pce_row["core_pce"]) if latest_core_pce_row else None,
-            "pce_core_yoy_label": latest_core_pce_row["month"] if latest_core_pce_row else latest_yoy_row["month"],
-            "pce_core_yoy_actual": float(core_pce_actual_yoy_series.iloc[-1]) if not core_pce_actual_yoy_series.empty else None,
-            "pce_core_actual_label": core_pce_actual_yoy_series.index[-1].strftime("%Y-%m") if not core_pce_actual_yoy_series.empty else None,
-            "cpi_yoy_series": pd.Series(cpi_series_values, index=cpi_series_index, name="CPI Nowcast YoY (%)") if cpi_series_values else None,
+
+@st.cache_data(ttl=3600)
+def fetch_cnn_fear_greed():
+    """抓取 CNN Fear & Greed Index，透過 CNN dataviz API"""
+    try:
+        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+
+        fg = data.get("fear_and_greed", {})
+        hist = data.get("fear_and_greed_historical", {})
+        score = float(fg.get("score", 50))
+        rating = fg.get("rating", "Neutral")
+        timestamp = fg.get("timestamp", "")
+
+        prev_close = float(hist.get("previousClose", score)) if hist.get("previousClose") else score
+        one_week = float(hist.get("oneWeekAgo", score)) if hist.get("oneWeekAgo") else None
+        one_month = float(hist.get("oneMonthAgo", score)) if hist.get("oneMonthAgo") else None
+        one_year = float(hist.get("oneYearAgo", score)) if hist.get("oneYearAgo") else None
+
+        return {
+            "score": score,
+            "rating": rating,
+            "timestamp": timestamp,
+            "previous_close": prev_close,
+            "one_week_ago": one_week,
+            "one_month_ago": one_month,
+            "one_year_ago": one_year,
+            "source_url": "https://edition.cnn.com/markets/fear-and-greed",
+            "fetch_success": True,
         }
+    except Exception as e:
+        print(f"Error fetching CNN Fear & Greed: {e}")
+        return None
 
-        cpi_nowcast_info["cpi_mom_nowcast"] = None
-        cpi_nowcast_info["pce_core_mom_nowcast"] = None
-        cpi_nowcast_info["cpi_prev_actual_mom"] = float(cpi_actual_mom.dropna().iloc[-1]) if not cpi_actual_mom.dropna().empty else None
-        cpi_nowcast_info["pce_prev_actual_mom"] = float(core_pce_actual_mom.dropna().iloc[-1]) if not core_pce_actual_mom.dropna().empty else None
 
-        return macro_df, vix_df, pmi_info, cpi_nowcast_info
-    except Exception:
-        return None, None, None, None
+def classify_fear_greed(score):
+    """
+    直覺分級對照：
+    0-24:  深綠 → Extreme Fear → 逢低佈局機會
+    25-44: 綠黃 → Fear → 觀望偏多
+    45-54: 黃燈 → Neutral → 觀望為主
+    55-74: 橙燈 → Greed → 減碼觀望
+    75-100: 深紅 → Extreme Greed → 減碼或保守
+    """
+    if score <= 24:
+        return {"label": "Extreme Fear", "emoji": "🟢", "color": "#166534",
+                "action": "逢低佈局機會", "action_short": "買點"}
+    elif score <= 44:
+        return {"label": "Fear", "emoji": "🟡", "color": "#65A30D",
+                "action": "觀望偏多", "action_short": "觀望"}
+    elif score <= 54:
+        return {"label": "Neutral", "emoji": "🟡", "color": "#CA8A04",
+                "action": "觀望為主", "action_short": "觀望"}
+    elif score <= 74:
+        return {"label": "Greed", "emoji": "🟠", "color": "#EA580C",
+                "action": "減碼觀望", "action_short": "減碼"}
+    else:
+        return {"label": "Extreme Greed", "emoji": "🔴", "color": "#991B1B",
+                "action": "減碼或保守", "action_short": "減碼"}
+
+
+def evaluate_sentiment_cross(fg_score, vix_val, cpi_yoy, rate_val, spread_val):
+    """
+    CNN 情緒 vs 現有四大指標交叉驗證，產生情緒確認訊息。
+    作為「頂層情緒確認層」，不直接覆蓋買賣決策。
+    """
+    cross_results = []
+
+    # --- CNN vs VIX ---
+    if fg_score <= 24 and vix_val >= 30:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "📈 強烈買入訊號",
+            "detail": "Extreme Fear + VIX 高：情緒恐慌，逢低佈局核心持股機會"})
+    elif fg_score >= 75 and vix_val < 20:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "📉 強烈防守訊號",
+            "detail": "Extreme Greed + VIX 低：風險加劇，建議提高防守資產、降低股票比重"})
+    elif fg_score <= 44 and vix_val >= 25:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "⚠️ 偏防守",
+            "detail": "Fear + VIX 偏高：市場緊張，注意防禦但留意反彈訊號"})
+    elif fg_score >= 55 and vix_val < 15:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "🟠 注意回調",
+            "detail": "Greed + VIX 極低：市場過於自滿，注意回調風險"})
+    else:
+        cross_results.append({"pair": "CNN vs VIX", "signal": "ℹ️ 中性",
+            "detail": f"CNN {fg_score:.0f} vs VIX {vix_val:.1f}：無極端衝突"})
+
+    # --- CNN vs CPI ---
+    if fg_score >= 75 and cpi_yoy > 3.5:
+        cross_results.append({"pair": "CNN vs CPI", "signal": "🔴 泡沫警示",
+            "detail": "Extreme Greed + 高通膨：泡沫風險，建議保守配置"})
+    elif fg_score <= 24 and cpi_yoy < 2.5:
+        cross_results.append({"pair": "CNN vs CPI", "signal": "🟢 逢低進場",
+            "detail": "Extreme Fear + 低通膨：基本面支撐下的恐慌超賣，進場機會"})
+    else:
+        cross_results.append({"pair": "CNN vs CPI", "signal": "ℹ️ 中性",
+            "detail": f"CNN {fg_score:.0f} vs CPI {cpi_yoy:.2f}%：無極端衝突"})
+
+    # --- CNN vs 利率 ---
+    if fg_score >= 75 and rate_val > 5.0:
+        cross_results.append({"pair": "CNN vs 利率", "signal": "🔴 風險偏高",
+            "detail": "Extreme Greed + 高利率：資金成本高且情緒過熱，風險偏高"})
+    elif fg_score <= 24 and rate_val < 3.0:
+        cross_results.append({"pair": "CNN vs 利率", "signal": "🟢 逢低機會",
+            "detail": "Extreme Fear + 低利率：寬鬆環境下的恐慌，逢低機會"})
+    else:
+        cross_results.append({"pair": "CNN vs 利率", "signal": "ℹ️ 中性",
+            "detail": f"CNN {fg_score:.0f} vs Rate {rate_val:.2f}%：無極端衝突"})
+
+    # --- CNN vs Spread ---
+    if fg_score >= 75 and spread_val < 0:
+        cross_results.append({"pair": "CNN vs Spread", "signal": "🔴 極度警戒",
+            "detail": "Extreme Greed + 殖利率倒掛：衰退風險與貪婪並存，極度警戒"})
+    elif fg_score <= 24 and spread_val > 1.0:
+        cross_results.append({"pair": "CNN vs Spread", "signal": "🟢 超賣機會",
+            "detail": "Extreme Fear + 正常利差：經濟結構正常下的恐慌超賣"})
+    else:
+        cross_results.append({"pair": "CNN vs Spread", "signal": "ℹ️ 中性",
+            "detail": f"CNN {fg_score:.0f} vs Spread {spread_val:.2f}：無極端衝突"})
+
+    # 綜合訊息
+    strong_buy = sum(1 for r in cross_results if "🟢" in r["signal"])
+    strong_sell = sum(1 for r in cross_results if "🔴" in r["signal"] or "📉" in r["signal"])
+    if strong_buy >= 2:
+        summary = "📈 多重指標確認：恐慌超賣，逢低佈局核心持股機會"
+    elif strong_sell >= 2:
+        summary = "📉 多重指標確認：風險加劇，建議提高防守資產、降低股票比重"
+    elif strong_buy == 1:
+        summary = "⚠️ 部分指標顯示買入訊號，但仍需觀察其他確認"
+    elif strong_sell == 1:
+        summary = "⚠️ 部分指標顯示防守訊號，但仍需觀察其他確認"
+    else:
+        summary = "ℹ️ CNN 情緒與現有指標無極端衝突，維持現有判斷"
+
+    return cross_results, summary
+
 
 # 下載資料
 df_close, df_vol, df_low = fetch_system_data()
 df_macro, df_vix, pmi_info, cpi_nowcast_info = fetch_macro_data()
+cnn_fg_data = fetch_cnn_fear_greed()
 
 # --- 3. 側邊欄：個人化參數與 PMI 趨勢判斷 ---
 st.sidebar.header("👤 1. 個人化參數")
@@ -329,6 +501,33 @@ with st.sidebar.expander("📚 PMI 趨勢判斷原理", expanded=False):
 不符合以上條件，例如 V 型反彈只視為震盪，不視為真正上升。
 """
     )
+
+st.sidebar.divider()
+st.sidebar.header("📌 4. CNN Fear & Greed")
+st.sidebar.markdown(
+    "[🔗 CNN Fear & Greed Index](https://edition.cnn.com/markets/fear-and-greed)"
+)
+if cnn_fg_data is not None and cnn_fg_data.get("fetch_success"):
+    fg_score_default = float(cnn_fg_data["score"])
+    fg_class = classify_fear_greed(fg_score_default)
+    st.sidebar.success(
+        f"已自動抓取 CNN Fear & Greed：{fg_class['emoji']} {fg_score_default:.0f} ({fg_class['label']})"
+    )
+    st.sidebar.caption(
+        f"資料來源：[CNN Fear & Greed Index]({cnn_fg_data['source_url']})"
+    )
+else:
+    fg_score_default = 50.0
+    st.sidebar.warning("CNN Fear & Greed 自動抓取失敗，請手動輸入數值。")
+
+fg_score_input = st.sidebar.number_input(
+    "CNN F&G 分數（0-100，可覆寫）", min_value=0.0, max_value=100.0,
+    value=fg_score_default, step=1.0
+)
+fg_classification = classify_fear_greed(fg_score_input)
+st.sidebar.info(
+    f"CNN 情緒判斷：{fg_classification['emoji']} {fg_classification['label']}｜建議：{fg_classification['action']}"
+)
 
 # --- 4. 技術指標與核心函數 ---
 def find_ftd_event(close_s, vol_s):
@@ -612,7 +811,13 @@ def calc_truth_alloc(age_val, ytr_val, mode_label, bond_protection_on, ftd_confi
     中樞 60% / 動態範圍 50-80% / 10% 生存金強制鎖定
     """
     # 1. 決定股票中樞 (Pivot) - 階梯式 Glide Path
-    if ytr_val > 10:
+    if ytr_val >= 25:      # 距退休 > 25 年 (年輕人)
+        pivot_stock = 85.0
+    elif ytr_val >= 20:    # 距退休 20-25 年
+        pivot_stock = 80.0
+    elif ytr_val >= 15:    # 距退休 15-20 年
+        pivot_stock = 70.0
+    elif ytr_val > 10:     # 距退休 10-15 年 (中生代)
         pivot_stock = 60.0
     elif ytr_val > 5:
         pivot_stock = 55.0
@@ -624,7 +829,14 @@ def calc_truth_alloc(age_val, ytr_val, mode_label, bond_protection_on, ftd_confi
     # 基礎配置固定 (辯論共識：10% 黃金, 10% 現金)
     base_gold = 10.0
     base_cash = 10.0
-    base_bond = 100.0 - pivot_stock - base_gold - base_cash
+    
+    # 處理年輕人高股票中樞導致的空間擠壓，避免 base_bond 變成負數
+    if pivot_stock + base_gold + base_cash > 100.0:
+        excess = pivot_stock + base_gold + base_cash - 100.0
+        base_gold = max(0.0, base_gold - excess) # 黃金優先讓出空間
+        base_bond = 0.0
+    else:
+        base_bond = 100.0 - pivot_stock - base_gold - base_cash
     
     # 2. 市場模式偏移 (Tactical Tilt)
     # 計算年齡壓縮係數 (Age Compression)，用於平時的 Tilt 縮放
@@ -643,17 +855,21 @@ def calc_truth_alloc(age_val, ytr_val, mode_label, bond_protection_on, ftd_confi
             tilt_reason = "Caution (FTD Amnesty)"
     
     # 3. 動態風險上限 (Dynamic Risk Cap)
-    safe_cap = min(100.0 - age_val, 50.0 + ytr_val)
+    # 年輕人適用較寬鬆的上限，中老年後依據 100-age 遞減
+    age_limit = 100.0 - age_val
+    ytr_limit = 50.0 + ytr_val
+    safe_cap = min(age_limit, ytr_limit)
     
     if drawdown_val <= -20:
-        # 🔴 掠食者模式：危機時上限釋放至 80%
-        max_stock = 80.0
+        # 🔴 掠食者模式：危機時上限釋放 (最高 90%，需留 10% 現金)
+        max_stock = 90.0 - base_gold
         mode_state = "🔴 掠食者模式 (上限釋放)"
         # 危機時不執行 age_compression 限制，允許直接加碼至上限
         if "Crisis" in mode_label:
             regime_tilt = 10.0 
     else:
-        # 🟢 守成模式：嚴格限額 (平時 60% 左右)
+        # 🟢 守成模式：不再強制用 min(pivot, safe_cap)，而是允許 pivot 達到 safe_cap
+        # 這樣 25 歲的人可以持有 pivot 的 85%，或受限於 safe_cap 的 75%
         max_stock = min(pivot_stock, safe_cap)
         mode_state = "🟢 守成模式 (嚴格限額)"
 
@@ -767,26 +983,6 @@ def create_gauge(val, title, min_v, max_v, steps, suffix="%", ref=None):
     return fig
 
 def create_drawdown_gauge(ticker, label, df):
-    if df is None or ticker not in df.columns:
-        return create_gauge(
-            0,
-            f"{label} - No data",
-            -60,
-            5,
-            [
-                {"range": [-50, -40], "color": "#7F1D1D"},
-                {"range": [-40, -35], "color": "#991B1B"},
-                {"range": [-35, -30], "color": "#B91C1C"},
-                {"range": [-30, -25], "color": "#DC2626"},
-                {"range": [-25, -20], "color": "#EF4444"},
-                {"range": [-20, -15], "color": "#F97316"},
-                {"range": [-15, -10], "color": "#F59E0B"},
-                {"range": [-10, -5], "color": "#EAB308"},
-                {"range": [-5, 0], "color": "#84CC16"},
-            ],
-            suffix="%",
-        )
-
     data = df[ticker].dropna()
     if data.empty or len(data) == 0:
         return create_gauge(
@@ -936,7 +1132,7 @@ if df_macro is not None:
     vix_val = df_vix.values[-1] if df_vix is not None and len(df_vix) > 0 else 18.0
     vix_latest = float(vix_val[0] if isinstance(vix_val, (np.ndarray, list)) else vix_val)
 else:
-    cpi_yoy, cpi_actual_yoy, core_pce_yoy, core_pce_actual_yoy, rate_val, spread_val, cpi_t, core_pce_t, rate_t = 3.2, 3.2, 3.0, 3.0, 5.25, 0.5, "Up", "Up", "Up"
+    cpi_yoy, cpi_actual_yoy, core_pce_yoy, core_pce_actual_yoy, cpi_prev, core_pce_prev, rate_val, rate_prev, spread_val, cpi_t, core_pce_t, rate_t = 3.2, 3.2, 3.0, 3.0, 3.2, 3.0, 5.25, 5.25, 0.5, "Up", "Up", "Up"
     vix_latest = 18.0
 
 bond_protection_on = bool(
@@ -1393,7 +1589,7 @@ if view_mode in ["Pro", "Master"]:
         st.metric(pce_actual_label, f"{core_pce_actual_yoy:.2f}%" if core_pce_actual_yoy is not None else "N/A")
     if cpi_nowcast_info is not None:
         st.caption(f"Nowcast 來源：[{cpi_nowcast_info['source_label']}]({cpi_nowcast_info['source_url']})｜更新時間：{cpi_nowcast_info.get('updated_at', 'N/A')}｜下方 gauge / 歷史圖 / 原始資料列表皆使用 FRED 官方歷史序列")
-    g1, g2, g3, g4 = st.columns(4)
+    g1, g2, g3, g4, g5 = st.columns(5)
     with g1:
         steps = [{"range": [0, 2], "color": "#A7F3D0"}, {"range": [2, 3], "color": "#FDE68A"}, {"range": [3, 10], "color": "#FECACA"}]
         st.plotly_chart(create_gauge(cpi_actual_yoy, f"CPI YoY 通膨<br><span style='font-size:11px;color:gray'>來源: FRED｜趨勢: {cpi_t}</span>", 0, 8, steps), use_container_width=True)
@@ -1406,6 +1602,20 @@ if view_mode in ["Pro", "Master"]:
     with g4:
         steps = [{"range": [0, 15], "color": "#BFDBFE"}, {"range": [15, 20], "color": "#A7F3D0"}, {"range": [20, 30], "color": "#FDE68A"}, {"range": [30, 60], "color": "#FECACA"}]
         st.plotly_chart(create_gauge(vix_latest, "VIX 恐慌指數", 0, 60, steps, suffix=""), use_container_width=True)
+    with g5:
+        fg_steps = [
+            {"range": [0, 25], "color": "#166534"},
+            {"range": [25, 45], "color": "#65A30D"},
+            {"range": [45, 55], "color": "#CA8A04"},
+            {"range": [55, 75], "color": "#EA580C"},
+            {"range": [75, 100], "color": "#991B1B"},
+        ]
+        fg_delta_ref = cnn_fg_data["previous_close"] if cnn_fg_data is not None else None
+        st.plotly_chart(create_gauge(
+            fg_score_input,
+            f"CNN Fear & Greed<br><span style='font-size:11px;color:gray'>{fg_classification['emoji']} {fg_classification['label']}｜{fg_classification['action_short']}</span>",
+            0, 100, fg_steps, suffix="", ref=fg_delta_ref
+        ), use_container_width=True)
 
     with st.expander("📈 查看各指標歷史趨勢圖及原始資料列表"):
         if df_macro is not None and cpi_yoy_series is not None:
@@ -1431,6 +1641,103 @@ if view_mode in ["Pro", "Master"]:
             st.dataframe(display_df.tail(10).sort_index(ascending=False), use_container_width=True)
         else:
             st.warning("目前使用手動輸入模式，無歷史數據可顯示。")
+
+    # --- 📌 市場情緒錶：CNN Fear & Greed ---
+    st.divider()
+    st.subheader("📌 市場情緒錶：CNN Fear & Greed")
+
+    # 計算交叉驗證
+    fg_cross_results, fg_cross_summary = evaluate_sentiment_cross(
+        fg_score_input, vix_latest, cpi_actual_yoy, rate_val, spread_val
+    )
+
+    fg_mc1, fg_mc2, fg_mc3 = st.columns(3)
+    with fg_mc1:
+        fg_delta_val = fg_score_input - cnn_fg_data["previous_close"] if cnn_fg_data is not None else None
+        st.metric(
+            f"{fg_classification['emoji']} CNN Fear & Greed",
+            f"{fg_score_input:.0f} ({fg_classification['label']})",
+            delta=f"{fg_delta_val:+.0f} vs 昨日" if fg_delta_val is not None else None,
+        )
+    with fg_mc2:
+        st.metric(
+            "建議動作",
+            fg_classification["action_short"],
+            delta=fg_classification["action"],
+            delta_color="off",
+        )
+    with fg_mc3:
+        # 將長文字轉換為簡短的狀態標籤，保持排版整潔
+        short_status = "ℹ️ 維持判斷"
+        if "📈" in fg_cross_summary: short_status = "📈 強烈買點"
+        elif "📉" in fg_cross_summary: short_status = "📉 強烈防禦"
+        elif "⚠️" in fg_cross_summary: short_status = "⚠️ 需再觀察"
+
+        st.metric(
+            "情緒確認層",
+            short_status,
+            help=fg_cross_summary  # 將完整訊息放入 Hover 提示框中
+        )
+
+    # 歷史參考
+    if cnn_fg_data is not None:
+        fg_hist_cols = st.columns(4)
+        hist_data = [
+            ("昨日收盤", cnn_fg_data.get("previous_close")),
+            ("一週前", cnn_fg_data.get("one_week_ago")),
+            ("一月前", cnn_fg_data.get("one_month_ago")),
+            ("一年前", cnn_fg_data.get("one_year_ago")),
+        ]
+        for col, (label, val) in zip(fg_hist_cols, hist_data):
+            if val is not None:
+                hist_cls = classify_fear_greed(val)
+                col.metric(label, f"{val:.0f}", delta=f"{hist_cls['emoji']} {hist_cls['label']}")
+            else:
+                col.metric(label, "N/A")
+
+    # 交叉對照摘要表 (顯示當前的對照結果)
+    st.markdown("**情緒交叉對照（CNN vs 現有指標）**")
+    fg_cross_df = pd.DataFrame(fg_cross_results)
+    fg_cross_df.columns = ["對照組", "訊號", "說明"]
+    st.dataframe(fg_cross_df, use_container_width=True, hide_index=True)
+
+    # 判斷機制與對照表 (收納至 Expander)
+    with st.expander("📋 情緒確認層詳細判斷機制與對照表", expanded=False):
+        st.markdown("#### 直覺分級對照表")
+        fg_ref_df = pd.DataFrame([
+            {"分數區間": "0 - 24", "燈號": "🟢 深綠", "分類": "Extreme Fear", "建議": "逢低佈局機會（買點）"},
+            {"分數區間": "25 - 44", "燈號": "🟡 綠黃", "分類": "Fear", "建議": "觀望偏多"},
+            {"分數區間": "45 - 54", "燈號": "🟡 黃燈", "分類": "Neutral", "建議": "觀望為主"},
+            {"分數區間": "55 - 74", "燈號": "🟠 橙燈", "分類": "Greed", "建議": "減碼觀望"},
+            {"分數區間": "75 - 100", "燈號": "🔴 深紅", "分類": "Extreme Greed", "建議": "減碼或保守（減碼）"},
+        ])
+        st.dataframe(fg_ref_df, use_container_width=True, hide_index=True)
+
+        st.markdown(
+            """
+#### 交叉對照判斷機制
+
+**【CNN vs VIX 波動率】**
+- **Extreme Fear + VIX 高 (>= 30)：** 📈 情緒恐慌，逢低佈局核心持股機會
+- **Extreme Greed + VIX 低 (< 20)：** 📉 風險加劇，建議提高防守資產、降低股票比重
+
+**【CNN vs CPI 通膨】**
+- **Extreme Greed + 高通膨 (> 3.5%)：** 🔴 泡沫風險，建議保守配置
+- **Extreme Fear + 低通膨 (< 2.5%)：** 🟢 基本面支撐下的恐慌超賣，進場機會
+
+**【CNN vs 利率】**
+- **Extreme Greed + 高利率 (> 5.0%)：** 🔴 資金成本高且情緒過熱，風險偏高
+- **Extreme Fear + 低利率 (< 3.0%)：** 🟢 寬鬆環境下的恐慌，逢低機會
+
+**【CNN vs Spread 利差】**
+- **Extreme Greed + 殖利率倒掛 (< 0)：** 🔴 衰退風險與貪婪並存，極度警戒
+- **Extreme Fear + 正常利差 (> 1.0)：** 🟢 經濟結構正常下的恐慌超賣
+            """
+        )
+    if cnn_fg_data is not None:
+        st.caption(f"資料來源：[CNN Fear & Greed Index]({cnn_fg_data['source_url']})")
+    else:
+        st.caption("⚠️ CNN 資料抓取失敗，目前使用手動輸入值。")
 
 
 if view_mode == "Master":
@@ -1612,6 +1919,8 @@ if view_mode in ["Pro", "Master"]:
             "Rate",
             "BLS/FRED Clock Phase",
             "Cleveland Fed Clock Phase",
+            "CNN Fear & Greed",
+            "CNN 情緒確認層",
             "FTD Guard",
             "Bond Protection",
             "Inflation Surprise",
@@ -1629,6 +1938,8 @@ if view_mode in ["Pro", "Master"]:
             macro_background_bls["Rate"],
             macro_background_bls["phase"],
             macro_background_nowcast["phase"],
+            f"{fg_classification['emoji']} {fg_score_input:.0f} ({fg_classification['label']})",
+            fg_cross_summary,
             ftd_msg,
             "ON" if bond_protection_on else "OFF",
             f"{inflation_surprise_label}｜{inflation_surprise:+.2f}%",
@@ -1646,6 +1957,8 @@ if view_mode in ["Pro", "Master"]:
             f"{macro_background_bls['Rate']}｜利率方向影響五燈號判斷。",
             f"{macro_background_bls['phase']}｜依據 PMI={macro_background_bls['PMI']}、CPI={cpi_actual_yoy:.2f}%({cpi_t})、Core PCE={bls_core_pce_yoy:.2f}%({core_pce_t})、Rate={macro_background_bls['Rate']} 綜合判斷｜原因：{macro_background_bls['phase_rule']}",
             f"{macro_background_nowcast['phase']}｜依據 PMI={macro_background_nowcast['PMI']}、CPI={cleveland_cpi_yoy:.2f}%({cpi_t})、Core PCE={cleveland_core_pce_yoy:.2f}%({core_pce_t})、Rate={macro_background_nowcast['Rate']} 綜合判斷｜原因：{macro_background_nowcast['phase_rule']}",
+            f"{fg_classification['emoji']} {fg_score_input:.0f} ({fg_classification['label']})｜CNN Fear & Greed 作為頂層情緒確認指標。建議：{fg_classification['action']}",
+            f"{fg_cross_summary}｜CNN 情緒 vs VIX/CPI/Rate/Spread 交叉驗證結果。",
             f"{ftd_msg}｜FTD Guard 失效時會優先壓抑風險承擔。",
             f"{'ON' if bond_protection_on else 'OFF'}｜高通膨/升息/偏熱 surprise 時，債券權重可能由現金承接。",
             f"{inflation_surprise_label}｜{inflation_surprise:+.2f}%｜若不足以單一判定燈號，需觀察後續月份。",
