@@ -465,60 +465,6 @@ df_close, df_vol, df_low = fetch_system_data()
 df_macro, df_vix, pmi_info, cpi_nowcast_info = fetch_macro_data()
 cnn_fg_data = fetch_cnn_fear_greed()
 
-# --- 威廉・歐尼爾單日漲幅與成交量檢視 ---
-st.divider()
-st.subheader("📈 威廉・歐尼爾單日漲幅與成交量檢視")
-st.caption(
-    "比較最近一個已完成交易日與前一交易日：收盤漲幅是否達 1.25%／1.5%，"
-    "以及成交量是否增加。完整 Follow-Through Day（FTD）還需符合反彈日數等條件。"
-)
-
-oneil_assets = [
-    ("S&P 500", "^GSPC", "SPY", "America/New_York", "S&P 500 指數", "SPY（成交量代理）"),
-    ("VT", "VT", "VT", "America/New_York", "VT", "VT"),
-    ("0050.TW", "0050.TW", "0050.TW", "Asia/Taipei", "0050.TW", "0050.TW"),
-]
-oneil_rows = []
-for asset_name, price_ticker, volume_ticker, market_timezone, price_label, volume_label in oneil_assets:
-    price_series = df_close[price_ticker] if price_ticker in df_close.columns else None
-    volume_series = df_vol[volume_ticker] if volume_ticker in df_vol.columns else None
-    signal = evaluate_oneil_daily_rule(price_series, volume_series, market_timezone)
-
-    if signal is None:
-        oneil_rows.append({
-            "標的": asset_name,
-            "交易日": "資料不足",
-            "單日漲幅": "—",
-            "成交量比較（當日 vs 前日）": "—",
-            "成交量條件": "無法判斷",
-            "1.25% + 量增": "無法判斷",
-            "1.5% + 量增": "無法判斷",
-            "價格來源": price_label,
-            "成交量來源": volume_label,
-        })
-        continue
-
-    gain_125 = signal["change_pct"] >= 1.25
-    gain_150 = signal["change_pct"] >= 1.5
-    volume_text = f'{signal["volume"]:,.0f} vs {signal["previous_volume"]:,.0f}'
-    oneil_rows.append({
-        "標的": asset_name,
-        "交易日": signal["date"],
-        "單日漲幅": f'{signal["change_pct"]:+.2f}%',
-        "成交量比較（當日 vs 前日）": volume_text,
-        "成交量條件": "✅ 放量" if signal["volume_up"] else "❌ 未放量",
-        "1.25% + 量增": "✅ 符合" if gain_125 and signal["volume_up"] else "❌ 未符合",
-        "1.5% + 量增": "✅ 符合" if gain_150 and signal["volume_up"] else "❌ 未符合",
-        "價格來源": price_label,
-        "成交量來源": volume_label,
-    })
-
-st.dataframe(pd.DataFrame(oneil_rows), use_container_width=True, hide_index=True)
-st.caption(
-    "標普 500 指數沒有可直接比較的個股成交量，因此以 SPY ETF 成交量作代理；"
-    "漲幅使用 ^GSPC 指數收盤價。量能僅在同一標的內與前一交易日比較。"
-)
-
 # --- 3. 側邊欄：個人化參數與 PMI 趨勢判斷 ---
 st.sidebar.header("👤 1. 個人化參數")
 age = st.sidebar.slider("目前年齡", 20, 75, 43)
@@ -1599,6 +1545,61 @@ if view_mode == "Master":
         st.info("⏸️ Level 5 暫緩：VIX 仍創高，先保留子彈。")
     elif vt_level != "未觸發" and already_executed:
         st.info(f"❌ 同一個 {vt_level} 已執行，避免重複動用現金。")
+
+    # --- 威廉・歐尼爾單日漲幅與成交量檢視 ---
+    st.divider()
+    st.markdown("#### 📈 威廉・歐尼爾單日漲幅與成交量檢視")
+    st.caption(
+        "比較最近一個已完成交易日與前一交易日：收盤漲幅是否達 1.25%／1.5%，"
+        "以及成交量是否增加。完整 Follow-Through Day（FTD）還需符合反彈日數等條件。"
+    )
+
+    oneil_assets = [
+        ("S&P 500", "^GSPC", "SPY", "America/New_York", "S&P 500 指數", "SPY（成交量代理）"),
+        ("VT", "VT", "VT", "America/New_York", "VT", "VT"),
+        ("0050.TW", "0050.TW", "0050.TW", "Asia/Taipei", "0050.TW", "0050.TW"),
+    ]
+    oneil_rows = []
+    for asset_name, price_ticker, volume_ticker, market_timezone, price_label, volume_label in oneil_assets:
+        price_series = df_close[price_ticker] if price_ticker in df_close.columns else None
+        volume_series = df_vol[volume_ticker] if volume_ticker in df_vol.columns else None
+        signal = evaluate_oneil_daily_rule(price_series, volume_series, market_timezone)
+
+        if signal is None:
+            oneil_rows.append({
+                "標的": asset_name,
+                "交易日": "資料不足",
+                "單日漲幅": "—",
+                "成交量比較（當日 vs 前日）": "—",
+                "成交量條件": "無法判斷",
+                "1.25% + 量增": "無法判斷",
+                "1.5% + 量增": "無法判斷",
+                "價格來源": price_label,
+                "成交量來源": volume_label,
+            })
+            continue
+
+        gain_125 = signal["change_pct"] >= 1.25
+        gain_150 = signal["change_pct"] >= 1.5
+        volume_text = f'{signal["volume"]:,.0f} vs {signal["previous_volume"]:,.0f}'
+        oneil_rows.append({
+            "標的": asset_name,
+            "交易日": signal["date"],
+            "單日漲幅": f'{signal["change_pct"]:+.2f}%',
+            "成交量比較（當日 vs 前日）": volume_text,
+            "成交量條件": "✅ 放量" if signal["volume_up"] else "❌ 未放量",
+            "1.25% + 量增": "✅ 符合" if gain_125 and signal["volume_up"] else "❌ 未符合",
+            "1.5% + 量增": "✅ 符合" if gain_150 and signal["volume_up"] else "❌ 未符合",
+            "價格來源": price_label,
+            "成交量來源": volume_label,
+        })
+
+    st.dataframe(pd.DataFrame(oneil_rows), use_container_width=True, hide_index=True)
+    st.caption(
+        "標普 500 指數沒有可直接比較的個股成交量，因此以 SPY ETF 成交量作代理；"
+        "漲幅使用 ^GSPC 指數收盤價。量能僅在同一標的內與前一交易日比較。"
+    )
+
 
 if view_mode == "Master":
     st.divider()
