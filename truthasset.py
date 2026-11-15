@@ -46,8 +46,8 @@ with st.expander("📘 新增功能判斷準則總覽", expanded=False):
 - 若現價跌破取消價（FTD 收盤價 × {FTD_CANCEL_PCT:.2f}），FTD 轉為 `🔴 Failed`，停止積極買入。
 
 ### 4. 抄底引擎（Drawdown Levels）
-- 進入 `Crisis` 後，股票上限由平時的安全水位釋放至 **80%**。
-- 依據回檔階梯（-20%/-25%/-30%/-35%/-40%）分批動用防禦資產。
+- VT、SPY、0050.TW 各依本身回檔階梯（-20%/-25%/-30%/-35%/-40%）啟動專屬抄底 Level。
+- 三個市場共用同一防守資產池，合計建議額受 10% 保留金與 90% 股票硬上限約束。
 - 受 **VIX Delay**（VIX 創高且斜率 > 0 時暫緩）約束。
 
 ### 5. 資產配置核心 (Master Pro 6.0)
@@ -716,6 +716,95 @@ def get_drawdown_level(dd):
     level = get_crisis_level(dd)
     return f"Level {level}" if level > 0 else "未觸發"
 
+
+def get_market_drawdown(close_frame, ticker):
+    if close_frame is None or ticker not in close_frame.columns:
+        return None
+    prices = close_frame[ticker].dropna()
+    if prices.empty:
+        return None
+    high = float(prices.tail(252).max())
+    return (float(prices.iloc[-1]) / high - 1) * 100 if high > 0 else None
+
+
+def plan_market_deployments(drawdowns, defense_pool, stock_headroom, vix_series, stop_investing=False):
+    """Plan independent market signals against one shared, capped defense pool."""
+    deployable_pool = max(0.0, defense_pool - 10.0)
+    budget = min(deployable_pool, max(0.0, stock_headroom))
+    plans = {}
+    for ticker, label in (("VT", "全球 VT"), ("SPY", "美股 SPY"), ("0050.TW", "台股 0050.TW")):
+        drawdown = drawdowns.get(ticker)
+        level = get_drawdown_level(drawdown) if drawdown is not None else "資料不足"
+        vix_state = evaluate_vix_ammo_delay(vix_series, level)
+        requested = deployable_pool * LEVEL_ALLOCATIONS.get(level, 0) / 100.0
+        if vix_state["delay"] or stop_investing:
+            requested = 0.0
+        plans[ticker] = {
+            "label": label,
+            "drawdown": drawdown,
+            "level": level,
+            "vix_delay": vix_state["delay"],
+            "requested": requested,
+        }
+
+    requested_total = sum(plan["requested"] for plan in plans.values())
+    scale = min(1.0, budget / requested_total) if requested_total > 0 else 0.0
+    for plan in plans.values():
+        plan["invest"] = plan["requested"] * scale
+    return plans, deployable_pool, budget
+
+
+def pending_exit_level(exit_signal):
+    pending_actions = {"尚未觸發賣出", "續抱觀察", "未達 Level 5 停利"}
+    level = exit_signal.get("觸發 Level（模擬）", "")
+    return level if exit_signal.get("現階段是否賣出") in pending_actions and level.startswith("Level ") else None
+
+
+def show_market_deployments(plans, exit_signals, defense_pool, deployable_pool, budget, stop_investing):
+    rows = []
+    for ticker, plan in plans.items():
+        exit_signal = exit_signals[ticker]
+        if plan["drawdown"] is None:
+            status = "資料不足"
+        elif plan["level"] == "未觸發":
+            status = "目前未達 -20%"
+        elif stop_investing:
+            status = "FTD Guard 暫停"
+        elif plan["vix_delay"]:
+            status = "VIX 暫緩 Level 5"
+        elif plan["invest"] <= 0:
+            status = "無可部署資金"
+        else:
+            status = "可依 Level 部署"
+        rows.append({
+            "市場": plan["label"],
+            "回檔": f"{plan['drawdown']:.2f}%" if plan["drawdown"] is not None else "資料不足",
+            "當前進場 Level": plan["level"],
+            "待賣 Level（模擬）": pending_exit_level(exit_signal) or "—",
+            "建議投入": f"{plan['invest']:.1f}%",
+            "狀態": status,
+            "賣出判斷": exit_signal["現階段是否賣出"],
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption(
+        f"同一防守資產池 {defense_pool:.1f}%｜保留 10%｜可部署池 {deployable_pool:.1f}%｜"
+        f"股票上限後可部署 {budget:.1f}%｜各市場建議合計不超過可部署額。"
+        "當前進場 Level 依最新回檔計算；待賣 Level 依最近一輪歷史觸發與模擬成本顯示，並非實際持倉。"
+        "SPY 是美股專屬戰術訊號，基本配置目標仍依 VT／0050.TW 計算。"
+    )
+
+
+def show_dip_sell_guide():
+    st.markdown("#### 💰 抄底後賣出建議｜CAN SLIM 一覽")
+    sell_rules = pd.DataFrame([
+        {"情境": "一般停損", "賣出／續抱條件": "收盤價低於該批買進成本 7–8%：停損賣出。", "適用": "每一批分開計算"},
+        {"情境": "一般停利", "賣出／續抱條件": "獲利達該批成本 20–25%：考慮鎖利。", "適用": "每一批分開計算"},
+        {"情境": "快速上漲例外", "賣出／續抱條件": "買進後 1–3 週內上漲 20% 以上：續抱；收盤跌破 10 日均線時再判斷是否賣出。", "適用": "突破一般 20–25% 停利規則"},
+        {"情境": "Level 5 特別規則", "賣出／續抱條件": "獲利達該批成本 50% 才進入停利賣出；若先觸發 7–8% 停損，仍依停損規則處理。", "適用": "本程式的 Level 5 規則"},
+    ])
+    st.table(sell_rules)
+    st.caption("請以每筆成交成本各自計算報酬；目前程式尚未記錄各批買進成本，因此這裡提供規則摘要，不能代替個人持倉的即時賣出價。")
+
 def get_master_regime(price, ma200, drawdown, vix, ftd_guard):
     if ftd_guard.get("stop_investing"):
         return "🟡 Caution（警戒）"
@@ -988,7 +1077,7 @@ def evaluate_rebalance_action(asset_type, current_pct, target_pct, mkt_data):
     band = STOCK_REBALANCE_BAND if asset_type in ["VT", "TW", "STOCK"] else GOLD_REBALANCE_BAND if asset_type == "GOLD" else BOND_REBALANCE_BAND
 
     if asset_type == "CASH":
-        if mkt_data["drawdown"] <= -20 and not mkt_data.get("vix_delay", False):
+        if mkt_data.get("deployment_pct", 0.0) > 0:
             return "TACTICAL_DEPLOYMENT"
         if mkt_data.get("vix_delay", False):
             return "DELAY_DEPLOYMENT"
@@ -1145,8 +1234,77 @@ def drawdown_episode_summary(ticker, label, df, threshold=-20.0):
     episode_label = "本輪最大回檔" if bool(below_threshold.iloc[-1]) else "該輪最大回檔"
     return f"{label}｜{start_label}｜{episode_label}：{max_drawdown:.1f}%（{max_date}）"
 
-if "executed_levels" not in st.session_state:
-    st.session_state.executed_levels = []
+
+def summarize_dip_exit(close_series, market_timezone):
+    """Evaluate the deepest tranche of the most recent -20% drawdown episode."""
+    empty = {"最近最大跌幅": "資料不足", "觸發 Level（模擬）": "無法判斷", "現階段是否賣出": "無法判斷", "原因": "缺少收盤價資料"}
+    if close_series is None:
+        return empty
+    prices = pd.to_numeric(close_series, errors="coerce").dropna()
+    if prices.empty:
+        return empty
+
+    index = pd.DatetimeIndex(pd.to_datetime(prices.index))
+    session_dates = index.tz_convert(market_timezone).date if index.tz is not None else index.date
+    today = pd.Timestamp.now(tz=market_timezone).date()
+    completed = [day < today for day in session_dates]
+    prices = prices.iloc[completed]
+    if prices.empty:
+        return empty
+
+    drawdown = (prices / prices.rolling(252, min_periods=1).max() - 1) * 100
+    below_20 = drawdown <= -20.0
+    crossings = below_20 & ~below_20.shift(1, fill_value=False)
+    starts = list(np.flatnonzero(crossings.to_numpy()))
+    if bool(below_20.iloc[0]):
+        starts.insert(0, 0)
+    if not starts:
+        return {
+            "最近最大跌幅": f"{float(drawdown.min()):.2f}%（近兩年）",
+            "觸發 Level（模擬）": "未觸發",
+            "現階段是否賣出": "無抄底部位可判斷",
+            "原因": "載入期間未曾跌至 -20%；未提供實際買進成本。",
+        }
+
+    start = starts[-1]
+    recovery = np.flatnonzero((~below_20.iloc[start + 1:]).to_numpy())
+    end = start + 1 + int(recovery[0]) if len(recovery) else len(drawdown)
+    episode = drawdown.iloc[start:end]
+    deepest = float(episode.min())
+    level = get_crisis_level(deepest)
+    threshold = -20.0 - 5.0 * (level - 1)
+    entry_offset = int(np.flatnonzero((episode <= threshold).to_numpy())[0])
+    entry_pos = start + entry_offset
+    entry_price = float(prices.iloc[entry_pos])
+    latest_price = float(prices.iloc[-1])
+    gain = (latest_price / entry_price - 1) * 100
+    entry_date = pd.Timestamp(prices.index[entry_pos]).strftime("%Y-%m-%d")
+    fast_window = prices.iloc[entry_pos + 1:entry_pos + 16]
+    fast_rise = bool((fast_window >= entry_price * 1.20).any())
+    ma10 = float(prices.tail(10).mean()) if len(prices) >= 10 else None
+    basis = f"以 {entry_date} 收盤 {entry_price:.2f} 模擬 Level {level} 進場；目前相對該價 {gain:+.1f}%"
+
+    if gain <= -8.0:
+        action, reason = "是，停損", "已低於模擬買進價 8%。"
+    elif gain <= -7.0:
+        action, reason = "進入停損區", "低於模擬買進價 7–8%，應檢視停損。"
+    elif level == 5:
+        action = "是，Level 5 停利" if gain >= 50.0 else "未達 Level 5 停利"
+        reason = "Level 5 依特別規則以 +50% 為停利門檻。"
+    elif fast_rise and ma10 is not None:
+        action = "檢視賣出" if latest_price < ma10 else "續抱觀察"
+        reason = f"買後 15 個交易日內曾上漲 20%；目前收盤 {'跌破' if latest_price < ma10 else '仍高於'} 10 日均線 {ma10:.2f}。"
+    elif gain >= 20.0:
+        action, reason = "考慮分批賣出", "已達一般 20–25% 鎖利區。"
+    else:
+        action, reason = "尚未觸發賣出", "未達 7–8% 停損或 20–25% 停利條件。"
+
+    return {
+        "最近最大跌幅": f"{deepest:.2f}%（{pd.Timestamp(episode.idxmin()).strftime('%Y-%m-%d')}）",
+        "觸發 Level（模擬）": f"Level {level}",
+        "現階段是否賣出": action,
+        "原因": f"{basis}；{reason}",
+    }
 
 # --- 5. 數據解析 ---
 is_ftd, ftd_msg = False, "觀察中"
@@ -1251,8 +1409,8 @@ def get_latest_tail_max(frame, ticker, tail_size, fallback):
 
 vt_curr_p = get_latest_series_value(df_close, "VT", 100.0)
 vt_ma200_v = get_latest_rolling_mean(df_close, "VT", 200, vt_curr_p)
-vt_high = get_latest_tail_max(df_close, "VT", 252, vt_curr_p)
-vt_dd_v = ((vt_curr_p - vt_high) / vt_high) * 100 if vt_high else 0.0
+vt_drawdown = get_market_drawdown(df_close, "VT")
+vt_dd_v = vt_drawdown if vt_drawdown is not None else 0.0
 vt_level = get_drawdown_level(vt_dd_v)
 vix_ammo_state = evaluate_vix_ammo_delay(df_vix, vt_level)
 
@@ -1343,14 +1501,42 @@ else:
 
 exit_ready = vt_curr_p > vt_ma200_v and vt_dd_v > -10 and not ftd_guard.get("stop_investing")
 defense_pool = bnd_p + csh_p
-deployable_defense_pool = max(0.0, defense_pool - 10.0)
-suggested_invest = deployable_defense_pool * (LEVEL_ALLOCATIONS.get(vt_level, 0) / 100.0)
-if vix_ammo_state["delay"]:
-    suggested_invest = 0
-executed_levels = st.session_state.executed_levels
-already_executed = vt_level in executed_levels if vt_level != "未觸發" else False
 remaining_cash = csh_p
 stock_headroom = max(0.0, MAX_STOCK_WEIGHT - stk_p)
+market_drawdowns = {
+    "VT": vt_drawdown,
+    "SPY": get_market_drawdown(df_close, "SPY"),
+    "0050.TW": get_market_drawdown(df_close, "0050.TW"),
+}
+market_deployments, deployable_defense_pool, deployment_budget = plan_market_deployments(
+    market_drawdowns, defense_pool, stock_headroom, df_vix, ftd_guard.get("stop_investing", False)
+)
+market_exit_signals = {
+    ticker: summarize_dip_exit(df_close[ticker] if ticker in df_close.columns else None, timezone)
+    for ticker, timezone in (("VT", "America/New_York"), ("SPY", "America/New_York"), ("0050.TW", "Asia/Taipei"))
+}
+suggested_invest = sum(plan["invest"] for plan in market_deployments.values())
+highest_level = max(get_crisis_level(dd) for dd in market_drawdowns.values() if dd is not None) if any(
+    dd is not None for dd in market_drawdowns.values()
+) else 0
+pending_levels = [
+    int(level.split()[-1])
+    for signal in market_exit_signals.values()
+    for level in [pending_exit_level(signal)]
+    if level
+]
+highest_pending_level = max(pending_levels, default=0)
+pending_label = f"L{highest_pending_level}" if highest_pending_level else "—"
+level_metric = f"進 L{highest_level}｜待賣 {pending_label}"
+level_summary = "｜".join(
+    f"{ticker} {plan['level'].replace('Level ', 'L') if plan['level'] != '未觸發' else 'L0'}"
+    for ticker, plan in market_deployments.items()
+)
+pending_summary = "｜".join(
+    f"{ticker} {(level or '—').replace('Level ', 'L')}"
+    for ticker, signal in market_exit_signals.items()
+    for level in [pending_exit_level(signal)]
+)
 deployed_pct = max(0.0, 100.0 - defense_pool - gld_p)
 cash_lock_status = "🟢 自行判斷"
 
@@ -1360,15 +1546,17 @@ if view_mode == "Master":
     regime_light = "🟢" if "Normal" in decision_regime else "🟡" if "Caution" in decision_regime else "🔴"
     regime_metric_label = "Normal" if "Normal" in decision_regime else "Caution" if "Caution" in decision_regime else "Crisis"
     regime_short_reason = "FTD/趨勢/廣度綜合後的最終模式"
-    level_num = vt_level.replace("Level ", "") if vt_level != "未觸發" else "0"
-
     tension_c1.metric(
         "Decision Regime",
         f"{regime_light} {regime_metric_label}",
         current_mode,
     )
     # 根據目前模式產生對應的操作建議 (與 caption 寫在一起)
-    if "Normal" in decision_regime:
+    if suggested_invest > 0:
+        guide_i = "VT／SPY／0050.TW 有市場專屬抄底訊號，依各自 Level 與共用資金上限部署。"
+    elif highest_pending_level > 0:
+        guide_i = f"目前未觸發新買；歷史模擬進場尚待賣出訊號：{pending_summary}。"
+    elif "Normal" in decision_regime:
         guide_i = "新入金按目標比例配置，維持系統平衡。"
     elif "Caution" in decision_regime:
         guide_i = "停止提高股票曝險，新資金會留在「現金池」觀望。"
@@ -1379,8 +1567,8 @@ if view_mode == "Master":
 
     tension_c1.caption(f"{decision_regime}｜{regime_short_reason}｜📘 {guide_i}")
 
-    tension_c2.metric("抄底 Level", f"Level {level_num}", f"投入 {suggested_invest:.1f}%")
-    tension_c2.caption(f"防守資產池 {defense_pool:.1f}%｜保留 10% 不動用｜可部署池 {deployable_defense_pool:.1f}%")
+    tension_c2.metric("抄底 Level", level_metric, f"新投入 {suggested_invest:.1f}%")
+    tension_c2.caption(f"當前進場：{level_summary}｜模擬待賣：{pending_summary}｜共用可部署額 {deployment_budget:.1f}%")
 
     tension_c3.metric("BLS/FRED Clock Phase", macro_background_bls["phase"])
     tension_c3.caption(
@@ -1429,8 +1617,12 @@ layer1_df = pd.DataFrame([
 
 if view_mode == "Beginner":
     st.metric("市場模式", current_mode)
-    if current_mode == "🔴 危機":
-        st.error(f"👉 **Crisis**：主動將現金池資金按 Level 階梯轉入股市抄底。當前可動用現金 {suggested_invest}%")
+    if suggested_invest > 0:
+        st.info(f"👉 **市場專屬抄底**：VT／SPY／0050.TW 各依自身回檔 Level 部署，合計建議投入 {suggested_invest:.1f}%。")
+    elif highest_pending_level > 0:
+        st.info(f"👉 **模擬待賣觀察**：{pending_summary}；目前沒有新的抄底投入建議。")
+    elif current_mode == "🔴 危機":
+        st.error("👉 **Crisis**：目前沒有可部署的市場專屬抄底額，請查看各市場 Level 與暫停原因。")
     elif current_mode == "🟡 警戒":
         st.warning("👉 **Caution**：停止提高股票曝險，新資金會留在「現金池」觀望。")
     else:
@@ -1440,6 +1632,7 @@ if view_mode == "Beginner":
         "配置": [f"{stk_p:.1f}%", f"{bnd_p:.1f}%", f"{gld_p:.1f}%", f"{csh_p:.1f}%"],
     })
     st.table(beginner_alloc)
+    show_market_deployments(market_deployments, market_exit_signals, defense_pool, deployable_defense_pool, deployment_budget, ftd_guard.get("stop_investing", False))
 else:
     st.table(layer1_df)
     mode_c1, mode_c2, mode_c3, mode_c4 = st.columns(4)
@@ -1463,25 +1656,20 @@ else:
                 st.plotly_chart(create_drawdown_gauge("QQQ", "QQQ (納斯達克)", df_close), use_container_width=True)
                 st.caption(drawdown_episode_summary("QQQ", "QQQ", df_close))
             with d4:
-                st.plotly_chart(create_drawdown_gauge("^GSPC", "S&P 500", df_close), use_container_width=True)
-                st.caption(drawdown_episode_summary("^GSPC", "S&P", df_close))
+                st.plotly_chart(create_drawdown_gauge("SPY", "SPY (美股)", df_close), use_container_width=True)
+                st.caption(drawdown_episode_summary("SPY", "SPY", df_close))
 
             st.caption("統計範圍：使用目前載入的近兩年日收盤資料，並以過去 252 個交易日最高收盤價計算回檔。")
 
             if view_mode == "Pro":
-                st.markdown("#### 🎁 抄底引擎")
+                st.markdown("#### 🎁 VT／SPY／0050.TW 專屬抄底引擎")
                 engine_c1, engine_c2, engine_c3, engine_c4 = st.columns(4)
-                engine_c1.metric("當前 Level", vt_level)
+                engine_c1.metric("進場／待賣 Level", level_metric)
                 engine_c2.metric("本次部署額 %", f"{suggested_invest:.1f}%")
-                engine_c3.metric("可部署防守池 %", f"{deployable_defense_pool:.1f}%")
+                engine_c3.metric("可部署上限 %", f"{deployment_budget:.1f}%")
                 engine_c4.metric("FTD", "✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded")
-
-                if vt_level != "未觸發" and not already_executed and not vix_ammo_state["delay"]:
-                    st.warning(f"👉 目前可依分級動用 {suggested_invest:.1f}%｜防守資產池={defense_pool:.1f}%｜保留 10%｜可部署池={deployable_defense_pool:.1f}%")
-                elif vt_level == "Level 5" and vix_ammo_state["delay"]:
-                    st.info("⏸️ Level 5 暫緩：VIX 仍創高，先保留子彈。")
-                elif vt_level != "未觸發" and already_executed:
-                    st.info(f"❌ 同一個 {vt_level} 已執行，避免重複動用現金。")
+                show_market_deployments(market_deployments, market_exit_signals, defense_pool, deployable_defense_pool, deployment_budget, ftd_guard.get("stop_investing", False))
+                show_dip_sell_guide()
 
 if ftd_guard.get("stop_investing"):
     st.warning(f"FTD 防錯機制啟動：{ftd_guard['message']}")
@@ -1518,11 +1706,16 @@ with nav1:
 - FTD：{ftd_msg}
 - Bond Protection：{'啟動' if bond_protection_on else '未啟動'}
 - VIX：{vix_latest:.1f}
-- Level：{vt_level}
+- 當前進場 Level：{level_summary}
+- 模擬待賣 Level：{pending_summary}
 """
         )
-    if current_mode == "🔴 危機":
-        action_msg = f"掠食者模式｜Level={vt_level}｜依計畫動用現金抄底"
+    if suggested_invest > 0:
+        action_msg = f"市場專屬抄底｜{level_summary}｜合計投入 {suggested_invest:.1f}%"
+    elif highest_pending_level > 0:
+        action_msg = f"模擬待賣觀察｜{pending_summary}｜目前無新買入額"
+    elif current_mode == "🔴 危機":
+        action_msg = "危機模式｜目前無可部署額｜查看市場 Level 與暫停原因"
     elif current_mode == "🟡 警戒":
         action_msg = "警戒避震｜停止主動買入股票｜新資金停留現金池"
     elif exit_ready:
@@ -1531,7 +1724,11 @@ with nav1:
         action_msg = "正常航行｜維持配置比例｜必要時再平衡"
     st.markdown(f"### 🎯 指令行動：**{action_msg}**")
 
-    if current_mode == "🔴 危機":
+    if suggested_invest > 0:
+        st.info("🔵 市場專屬 Level 已觸發：依 VT／SPY／0050.TW 各自回檔部署，共用防守資產池並保留 10%。")
+    elif highest_pending_level > 0:
+        st.info(f"🟠 最近一輪模擬進場尚未觸發賣出：{pending_summary}。請以實際成交紀錄確認持倉。")
+    elif current_mode == "🔴 危機":
         st.error("🔴 危機模式：股票上限釋放至 80%，依回檔階梯主動消耗現金部署股市。")
     elif current_mode == "🟡 警戒":
         st.warning("🟡 警戒模式：停止主動提高股票曝險，保持目前持倉，新入金的資金會停留在「現金池」，而不是投入股市。")
@@ -1638,35 +1835,29 @@ if view_mode == "Master":
 - 只在觸發 Level 後才考慮部署現金。
 - 5 次分批的母數 = 現金 + 債券的防守資產總和。
 - 其中最後 **10% 永遠保留**，不納入部署母數。
-- 每次建議部署額 =（防守資產池 - 10%）× 對應 Level 比例。
-- 若 Level 5 且 VIX 仍創高，則延後部署。
-- 若同一個 Level 已執行過，避免重複動用現金。
+- VT、SPY、0050.TW 各自依近 252 個交易日最高收盤價判斷 Level。
+- 各市場原始建議額 =（防守資產池 - 10%）× 對應 Level 比例；合計超過可部署額時按比例縮減。
+- 合計受股票上限約束；FTD Guard 停止投資或該市場 Level 5 遇 VIX 創高時暫停部署。
 
 **你現在看到這個結果，是因為**
-- VT 當前回檔：{vt_dd_v:.1f}%
-- 判斷 Level：{vt_level}
-- 建議可動用：{suggested_invest:.0f}%
+- 當前進場 Level：{level_summary}
+- 模擬待賣 Level：{pending_summary}
+- 合計建議可動用：{suggested_invest:.1f}%
 - FTD Guard：{ftd_msg}
 - VIX Ammo：{vix_ammo_state['message']}
-- 已執行同級別：{'是' if already_executed else '否'}
 """
         )
     engine_c1, engine_c2, engine_c3, engine_c4 = st.columns(4)
-    engine_c1.metric("當前 Level", vt_level)
+    engine_c1.metric("進場／待賣 Level", level_metric)
     engine_c2.metric("本次部署額 %", f"{suggested_invest:.1f}%")
-    engine_c3.metric("可部署防守池 %", f"{deployable_defense_pool:.1f}%")
+    engine_c3.metric("可部署上限 %", f"{deployment_budget:.1f}%")
     engine_c4.metric("FTD", "✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded")
-
-    if vt_level != "未觸發" and not already_executed and not vix_ammo_state["delay"]:
-        st.warning(f"👉 目前可依分級動用 {suggested_invest:.1f}%｜防守資產池={defense_pool:.1f}%｜保留 10%｜可部署池={deployable_defense_pool:.1f}%")
-    elif vt_level == "Level 5" and vix_ammo_state["delay"]:
-        st.info("⏸️ Level 5 暫緩：VIX 仍創高，先保留子彈。")
-    elif vt_level != "未觸發" and already_executed:
-        st.info(f"❌ 同一個 {vt_level} 已執行，避免重複動用現金。")
+    show_market_deployments(market_deployments, market_exit_signals, defense_pool, deployable_defense_pool, deployment_budget, ftd_guard.get("stop_investing", False))
+    show_dip_sell_guide()
 
     # --- 威廉・歐尼爾單日漲幅與成交量檢視 ---
     st.divider()
-    st.markdown("#### 📈 威廉・歐尼爾單日漲幅與成交量檢視")
+    st.markdown("#### 📈 威廉・歐尼爾單日漲幅、成交量與抄底賣出檢視")
     st.caption(
         "比較最近一個已完成交易日與前一交易日：收盤漲幅是否達 1.25%／1.5%，"
         "以及成交量是否增加。完整 Follow-Through Day（FTD）還需符合反彈日數等條件。"
@@ -1682,11 +1873,13 @@ if view_mode == "Master":
         price_series = df_close[price_ticker] if price_ticker in df_close.columns else None
         volume_series = df_vol[volume_ticker] if volume_ticker in df_vol.columns else None
         signal = evaluate_oneil_daily_rule(price_series, volume_series, market_timezone)
+        exit_signal = summarize_dip_exit(price_series, market_timezone)
 
         if signal is None:
             oneil_rows.append({
                 "標的": asset_name,
                 "交易日": "資料不足",
+                **exit_signal,
                 "單日漲幅": "—",
                 "成交量比較（當日 vs 前日）": "—",
                 "成交量條件": "無法判斷",
@@ -1703,6 +1896,7 @@ if view_mode == "Master":
         oneil_rows.append({
             "標的": asset_name,
             "交易日": signal["date"],
+            **exit_signal,
             "單日漲幅": f'{signal["change_pct"]:+.2f}%',
             "成交量比較（當日 vs 前日）": volume_text,
             "成交量條件": "✅ 放量" if signal["volume_up"] else "❌ 未放量",
@@ -1715,7 +1909,10 @@ if view_mode == "Master":
     st.dataframe(pd.DataFrame(oneil_rows), use_container_width=True, hide_index=True)
     st.caption(
         "標普 500 指數沒有可直接比較的個股成交量，因此以 SPY ETF 成交量作代理；"
-        "漲幅使用 ^GSPC 指數收盤價。量能僅在同一標的內與前一交易日比較。"
+        "漲幅與回檔使用 ^GSPC 指數收盤價。量能僅在同一標的內與前一交易日比較。"
+        "最近最大跌幅取載入期間最近一次跌破 -20% 的回檔事件；Level 與賣出判斷以該事件最深級別首次觸發日的收盤價模擬，"
+        "快速上漲的 1–3 週以買後 15 個交易日近似。這不是實際成交或持倉；"
+        "若需判斷真實持倉，仍須提供每筆買進日期與成本；S&P 500 指數不能直接交易。"
     )
 
 
@@ -1948,7 +2145,8 @@ if view_mode == "Master":
         "price": vt_curr_p,
         "ma200": vt_ma200_v,
         "drawdown": vt_dd_v,
-        "vix_delay": vix_ammo_state["delay"],
+        "vix_delay": any(plan["vix_delay"] for plan in market_deployments.values()),
+        "deployment_pct": suggested_invest,
         "vix": vix_latest,
         "stock_headroom": stock_headroom,
     }
@@ -1957,7 +2155,7 @@ if view_mode == "Master":
         "BUY_TO_TARGET": ("🟡 Buy", "買回目標配置"),
         "SELL_TO_TARGET": ("🔴 Sell", "賣回目標配置"),
         "HOLD": ("🟢 Hold", "不動"),
-        "TACTICAL_DEPLOYMENT": ("🔴 Crisis Override", "危機期可依規則動用現金"),
+        "TACTICAL_DEPLOYMENT": ("🔵 市場專屬抄底", "依市場 Level 動用防守資產"),
         "DELAY_DEPLOYMENT": ("🟠 延遲部署", "VIX 仍創高，暫緩 Level 5 現金動用"),
         "HOLD_CASH": ("🟢 Hold", "保留現金緩衝"),
     }
@@ -1970,7 +2168,7 @@ if view_mode == "Master":
         reason_bits = []
 
         if asset_type == "CASH":
-            reason_bits.append(f"現金池依 drawdown={vt_dd_v:.1f}% 與 VIX delay={vix_ammo_state['delay']} 做事件驅動判斷")
+            reason_bits.append(f"現金池依 VT／SPY／0050.TW 專屬 Level 做事件驅動判斷；合計建議投入 {suggested_invest:.1f}%")
         else:
             reason_bits.append(f"偏離 {deviation:+.1f}% vs band ±{band:.1f}%")
             if deviation < 0:
@@ -1980,11 +2178,24 @@ if view_mode == "Master":
             else:
                 reason_bits.append("剛好在目標附近")
 
-        if current_mode == "🔴 危機" and asset_type in ["VT", "TW", "BOND"]:
+        if asset_type in ["VT", "TW"]:
+            market_ticker = "VT" if asset_type == "VT" else "0050.TW"
+            market_plan = market_deployments[market_ticker]
+            if market_plan["invest"] > 0:
+                status = "🔵 市場專屬抄底"
+                action = f"依 {market_plan['level']} 建議投入 {market_plan['invest']:.1f}%"
+                trigger = "TACTICAL_DEPLOYMENT"
+                reason_bits.append(f"{market_plan['label']} 回檔 {market_plan['drawdown']:.2f}% 觸發專屬 Level")
+            elif current_mode == "🔴 危機":
+                status = "🔴 Crisis Override"
+                action = "暫停一般再平衡；此標的目前無部署額"
+                trigger = "HOLD"
+                reason_bits.append("危機模式下只依此標的專屬 Level 部署")
+        elif current_mode == "🔴 危機" and asset_type == "BOND":
             status = "🔴 Crisis Override"
-            action = "改由危機現金調度規則處理"
-            trigger = "TACTICAL_DEPLOYMENT"
-            reason_bits.append("危機模式下，股票/債券再平衡由抄底引擎覆蓋")
+            action = "暫停一般再平衡；依市場部署表管理防守資產"
+            trigger = "HOLD"
+            reason_bits.append("危機模式下債券由共用防守資產池規則管理")
 
         if bond_protection_on and asset_type == "BOND":
             reason_bits.append("Bond Protection 開啟，債券目標可能被現金取代")
@@ -2005,6 +2216,8 @@ if view_mode == "Master":
         st.warning("🟠 子彈保留法則：Level 5 仍在流動性危機區，現金動用延後。")
     elif "🔴 Crisis Override" in rebalance_status_priority:
         st.error("🔴 Crisis：一般再平衡暫停，改由危機現金調度規則接管。")
+    elif "🔵 市場專屬抄底" in rebalance_status_priority:
+        st.info("🔵 VT／SPY／0050.TW 有專屬抄底訊號，請依上方市場部署表查看標的與額度。")
     elif "🔴 需要再平衡" in rebalance_status_priority:
         st.warning("🔴 需要再平衡：至少一項資產已超出差異化閾值。")
     elif "🟡 Buy" in rebalance_status_priority or "🔴 Sell" in rebalance_status_priority:
