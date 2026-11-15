@@ -1103,6 +1103,47 @@ def create_drawdown_gauge(ticker, label, df):
     fig.update_layout(height=240, margin=dict(l=20, r=20, t=70, b=10))
     return fig
 
+
+def drawdown_episode_summary(ticker, label, df, threshold=-20.0):
+    """Summarize the latest drawdown episode crossing the configured threshold."""
+    if df is None or ticker not in df.columns:
+        return f"{label}：資料不足"
+
+    prices = pd.to_numeric(df[ticker], errors="coerce").dropna()
+    if prices.empty:
+        return f"{label}：資料不足"
+
+    drawdown = (prices / prices.rolling(252, min_periods=1).max() - 1) * 100
+    below_threshold = drawdown <= threshold
+    crossed_below = below_threshold & ~below_threshold.shift(1, fill_value=False)
+
+    crossing_positions = list(drawdown.index[crossed_below])
+    left_censored = bool(below_threshold.iloc[0])
+    if left_censored:
+        crossing_positions.insert(0, drawdown.index[0])
+
+    if not crossing_positions:
+        return f"{label}：近兩年未跌破 {threshold:.0f}%"
+
+    episode_start = crossing_positions[-1]
+    start_pos = drawdown.index.get_loc(episode_start)
+    recovery_positions = [
+        pos for pos in range(start_pos + 1, len(drawdown))
+        if not below_threshold.iloc[pos]
+    ]
+    episode_end = recovery_positions[0] if recovery_positions else len(drawdown)
+    episode = drawdown.iloc[start_pos:episode_end]
+    max_drawdown = float(episode.min())
+    max_date = pd.Timestamp(episode.idxmin()).strftime("%Y-%m-%d")
+
+    if episode_start == drawdown.index[0] and left_censored and len(crossing_positions) == 1:
+        start_label = f"資料起點已低於 {threshold:.0f}%（{pd.Timestamp(episode_start).strftime('%Y-%m-%d')} 起）"
+    else:
+        start_label = f"最近跌破 {threshold:.0f}%：{pd.Timestamp(episode_start).strftime('%Y-%m-%d')}"
+
+    episode_label = "本輪最大回檔" if bool(below_threshold.iloc[-1]) else "該輪最大回檔"
+    return f"{label}｜{start_label}｜{episode_label}：{max_drawdown:.1f}%（{max_date}）"
+
 if "executed_levels" not in st.session_state:
     st.session_state.executed_levels = []
 
@@ -1413,12 +1454,16 @@ else:
             d1, d2, d3, d4 = st.columns(4)
             with d1:
                 st.plotly_chart(create_drawdown_gauge("VT", "VT (全球股市)", df_close), use_container_width=True)
+                st.caption(drawdown_episode_summary("VT", "VT", df_close))
             with d2:
                 st.plotly_chart(create_drawdown_gauge("0050.TW", "0050.TW (台灣50)", df_close), use_container_width=True)
+                st.caption(drawdown_episode_summary("0050.TW", "0050.TW", df_close))
             with d3:
                 st.plotly_chart(create_drawdown_gauge("QQQ", "QQQ (納斯達克)", df_close), use_container_width=True)
+                st.caption(drawdown_episode_summary("QQQ", "QQQ", df_close))
             with d4:
                 st.plotly_chart(create_drawdown_gauge("^GSPC", "S&P 500", df_close), use_container_width=True)
+                st.caption(drawdown_episode_summary("^GSPC", "S&P", df_close))\n\n            st.caption("統計範圍：使用目前載入的近兩年日收盤資料，並以過去 252 個交易日最高收盤價計算回檔。")
 
             if view_mode == "Pro":
                 st.markdown("#### 🎁 抄底引擎")
