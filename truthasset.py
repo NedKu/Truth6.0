@@ -1463,7 +1463,9 @@ else:
                 st.caption(drawdown_episode_summary("QQQ", "QQQ", df_close))
             with d4:
                 st.plotly_chart(create_drawdown_gauge("^GSPC", "S&P 500", df_close), use_container_width=True)
-                st.caption(drawdown_episode_summary("^GSPC", "S&P", df_close))\n\n            st.caption("統計範圍：使用目前載入的近兩年日收盤資料，並以過去 252 個交易日最高收盤價計算回檔。")
+                st.caption(drawdown_episode_summary("^GSPC", "S&P", df_close))
+
+            st.caption("統計範圍：使用目前載入的近兩年日收盤資料，並以過去 252 個交易日最高收盤價計算回檔。")
 
             if view_mode == "Pro":
                 st.markdown("#### 🎁 抄底引擎")
