@@ -489,7 +489,7 @@ for asset_name, price_ticker, volume_ticker, market_timezone, price_label, volum
             "標的": asset_name,
             "交易日": "資料不足",
             "單日漲幅": "—",
-            "成交量比較": "—",
+            "成交量比較（當日 vs 前日）": "—",
             "成交量條件": "無法判斷",
             "1.25% + 量增": "無法判斷",
             "1.5% + 量增": "無法判斷",
@@ -500,11 +500,7 @@ for asset_name, price_ticker, volume_ticker, market_timezone, price_label, volum
 
     gain_125 = signal["change_pct"] >= 1.25
     gain_150 = signal["change_pct"] >= 1.5
-    volume_text = (
-        f'{signal["volume"]:,.0f} vs {signal["previous_volume"]:,.0f}'
-        if signal["previous_volume"] > 0
-        else f'{signal["volume"]:,.0f} vs {signal["previous_volume"]:,.0f}'
-    )
+    volume_text = f'{signal["volume"]:,.0f} vs {signal["previous_volume"]:,.0f}'
     oneil_rows.append({
         "標的": asset_name,
         "交易日": signal["date"],
