@@ -1551,6 +1551,76 @@ with nav2:
 
 if view_mode == "Master":
     st.divider()
+    st.markdown("### ⚙️ Layer 2：資產配置")
+    with st.expander("❓ 這裡怎麼判斷？", expanded=False):
+        st.markdown(
+            f"""
+**Layer 2 的目標：依照目前 code，先決定基礎股債現金，再套用 Regime、FTD、Drawdown 與 Bond Protection。**
+
+**固定原則（依 code 實際執行）**
+- 黃金預設 **5%**；若 `mode_label` 文字中包含 `滯脹`，黃金改為 **10%**。
+- 防守資產 = **債券 + 現金**。
+- 平時股票上限使用 `safe_cap = min(100-age, 50+ytr)`。
+- 若 `drawdown <= -20` 且 `ftd_confirmed=True`，股票上限改為 **90%**。
+
+**基礎配置（依年齡 / 距退休年數）**
+- `age <= 35`：基礎配置 = 股票 90 / 債券 0 / 現金 10。
+- `age > 35` 且 `ytr >= 10`：基礎配置 = 股票 80 / 債券 10 / 現金 10。
+- `age > 35` 且 `0 < ytr < 10`：
+  - 股票會在 **90% → 50%** 間線性下降。
+  - 防守總量 = `95 - 股票`。
+  - 現金 = 防守總量的 25%，但至少 5%。
+  - 其餘防守配置到債券。
+- `ytr <= 0`（已退休）：基礎配置 = 股票 50 / 債券 40.5 / 現金 4.5。
+
+**Tilt 規則（依 code 實際執行）**
+- `Normal`：`regime_tilt = +5% × age_compression`
+- `Caution`：`regime_tilt = -5% × age_compression`
+- `Crisis`：不直接給固定正向 tilt；危機擴張主要依 drawdown + FTD 觸發的股票上限釋放與防守資產轉移。
+
+**上限與溢位處理**
+- `stock_raw = base_stock + regime_tilt`
+- 若 `stock_raw > max_stock`，超出的 `overflow` 直接轉入現金。
+- 之後把 **債券 / 黃金 / 現金** 依剩餘空間重新正規化，確保總和回到 100%，而股票不再被二次縮放。
+
+**Bond Protection**
+- 啟動後，原本債券目標全數轉入現金，債券變成 0%。
+
+**你現在看到這個配置，是因為**
+- 目前距退休：{ytr} 年
+- 平時安全上限（safe cap）：{alloc_explain['safe_cap']:.1f}%
+- 目前股票上限（max stock）：{alloc_explain['max_stock']:.1f}%
+- 模式狀態：{alloc_explain['mode_state']}
+- 目前模式：{current_mode}
+- 套用 Tilt：{tilt_used:+.1f}%
+- Bond Protection：{'啟動' if bond_protection_on else '未啟動'}
+- 目標配置總和：{target_alloc_sum:.1f}%
+"""
+        )
+    alloc_df = pd.DataFrame({
+        "項目": ["VT", "0050.TW", "債券", "黃金", "現金"],
+        "Base allocation": [f"{vt_stock_base:.1f}%", f"{tw_stock_base:.1f}%", f"{b_bnd_v:.1f}%", "5.0%", f"{b_csh_v:.1f}%"],
+        "Mode 調整後": [f"{vt_stock_target:.1f}%", f"{tw_stock_target:.1f}%", f"{bnd_p:.1f}%", f"{gld_p:.1f}%", f"{csh_p:.1f}%"],
+        "實際 vs 目標差異": [f"{vt_stock_target - vt_stock_base:+.1f}%", f"{tw_stock_target - tw_stock_base:+.1f}%", f"{bnd_p - b_bnd_v:+.1f}%", "+0.0%", f"{csh_p - b_csh_v:+.1f}%"],
+    })
+    st.table(alloc_df)
+
+    if abs(target_alloc_sum - 100.0) > 0.05:
+        st.error(f"⚠️ 目標配置總和異常：目前合計 {target_alloc_sum:.2f}%（偏離 100% {target_alloc_sum - 100.0:+.2f}%）")
+    else:
+        st.caption(f"✅ 目標配置總和檢查通過：{target_alloc_sum:.1f}%")
+
+    explain_df = pd.DataFrame([
+        {"規則": "Tilt 來源", "說明": alloc_explain["tilt_reason"]},
+        {"規則": "債券 / 現金拆分", "說明": alloc_explain["bond_reason"]},
+        {"規則": "最終決策模式", "說明": alloc_explain["mode_label"]},
+        {"規則": "FTD 對 Tilt 的影響", "說明": "FTD 不直接改 Tilt；只透過 Guard 影響 invest gating，必要時把 Regime 壓成 Caution。"},
+    ])
+    st.caption(f"防守總量（Base）{alloc_explain['defense_total']:.1f}%｜Tilt 後防守總量 {alloc_explain['defense_after']:.1f}%")
+    st.table(explain_df)
+
+if view_mode == "Master":
+    st.divider()
     st.markdown("### 🎁 Layer 3：抄底引擎")
     with st.expander("❓ 這裡怎麼判斷？", expanded=False):
         st.markdown(
@@ -1648,76 +1718,6 @@ if view_mode == "Master":
         "漲幅使用 ^GSPC 指數收盤價。量能僅在同一標的內與前一交易日比較。"
     )
 
-
-if view_mode == "Master":
-    st.divider()
-    st.markdown("### ⚙️ Layer 2：資產配置")
-    with st.expander("❓ 這裡怎麼判斷？", expanded=False):
-        st.markdown(
-            f"""
-**Layer 2 的目標：依照目前 code，先決定基礎股債現金，再套用 Regime、FTD、Drawdown 與 Bond Protection。**
-
-**固定原則（依 code 實際執行）**
-- 黃金預設 **5%**；若 `mode_label` 文字中包含 `滯脹`，黃金改為 **10%**。
-- 防守資產 = **債券 + 現金**。
-- 平時股票上限使用 `safe_cap = min(100-age, 50+ytr)`。
-- 若 `drawdown <= -20` 且 `ftd_confirmed=True`，股票上限改為 **90%**。
-
-**基礎配置（依年齡 / 距退休年數）**
-- `age <= 35`：基礎配置 = 股票 90 / 債券 0 / 現金 10。
-- `age > 35` 且 `ytr >= 10`：基礎配置 = 股票 80 / 債券 10 / 現金 10。
-- `age > 35` 且 `0 < ytr < 10`：
-  - 股票會在 **90% → 50%** 間線性下降。
-  - 防守總量 = `95 - 股票`。
-  - 現金 = 防守總量的 25%，但至少 5%。
-  - 其餘防守配置到債券。
-- `ytr <= 0`（已退休）：基礎配置 = 股票 50 / 債券 40.5 / 現金 4.5。
-
-**Tilt 規則（依 code 實際執行）**
-- `Normal`：`regime_tilt = +5% × age_compression`
-- `Caution`：`regime_tilt = -5% × age_compression`
-- `Crisis`：不直接給固定正向 tilt；危機擴張主要依 drawdown + FTD 觸發的股票上限釋放與防守資產轉移。
-
-**上限與溢位處理**
-- `stock_raw = base_stock + regime_tilt`
-- 若 `stock_raw > max_stock`，超出的 `overflow` 直接轉入現金。
-- 之後把 **債券 / 黃金 / 現金** 依剩餘空間重新正規化，確保總和回到 100%，而股票不再被二次縮放。
-
-**Bond Protection**
-- 啟動後，原本債券目標全數轉入現金，債券變成 0%。
-
-**你現在看到這個配置，是因為**
-- 目前距退休：{ytr} 年
-- 平時安全上限（safe cap）：{alloc_explain['safe_cap']:.1f}%
-- 目前股票上限（max stock）：{alloc_explain['max_stock']:.1f}%
-- 模式狀態：{alloc_explain['mode_state']}
-- 目前模式：{current_mode}
-- 套用 Tilt：{tilt_used:+.1f}%
-- Bond Protection：{'啟動' if bond_protection_on else '未啟動'}
-- 目標配置總和：{target_alloc_sum:.1f}%
-"""
-        )
-    alloc_df = pd.DataFrame({
-        "項目": ["VT", "0050.TW", "債券", "黃金", "現金"],
-        "Base allocation": [f"{vt_stock_base:.1f}%", f"{tw_stock_base:.1f}%", f"{b_bnd_v:.1f}%", "5.0%", f"{b_csh_v:.1f}%"],
-        "Mode 調整後": [f"{vt_stock_target:.1f}%", f"{tw_stock_target:.1f}%", f"{bnd_p:.1f}%", f"{gld_p:.1f}%", f"{csh_p:.1f}%"],
-        "實際 vs 目標差異": [f"{vt_stock_target - vt_stock_base:+.1f}%", f"{tw_stock_target - tw_stock_base:+.1f}%", f"{bnd_p - b_bnd_v:+.1f}%", "+0.0%", f"{csh_p - b_csh_v:+.1f}%"],
-    })
-    st.table(alloc_df)
-
-    if abs(target_alloc_sum - 100.0) > 0.05:
-        st.error(f"⚠️ 目標配置總和異常：目前合計 {target_alloc_sum:.2f}%（偏離 100% {target_alloc_sum - 100.0:+.2f}%）")
-    else:
-        st.caption(f"✅ 目標配置總和檢查通過：{target_alloc_sum:.1f}%")
-
-    explain_df = pd.DataFrame([
-        {"規則": "Tilt 來源", "說明": alloc_explain["tilt_reason"]},
-        {"規則": "債券 / 現金拆分", "說明": alloc_explain["bond_reason"]},
-        {"規則": "最終決策模式", "說明": alloc_explain["mode_label"]},
-        {"規則": "FTD 對 Tilt 的影響", "說明": "FTD 不直接改 Tilt；只透過 Guard 影響 invest gating，必要時把 Regime 壓成 Caution。"},
-    ])
-    st.caption(f"防守總量（Base）{alloc_explain['defense_total']:.1f}%｜Tilt 後防守總量 {alloc_explain['defense_after']:.1f}%")
-    st.table(explain_df)
 
 if view_mode in ["Pro", "Master"]:
     st.divider()
