@@ -1884,6 +1884,65 @@ if view_mode in ["Pro", "Master"]:
     if cnn_fg_data is not None:
         st.caption(f"資料來源：[CNN Fear & Greed Index]({cnn_fg_data['source_url']})")
     else:
+
+st.markdown(
+    """
+    <style>
+    .tool-links {
+        margin: 1.5rem 0 1rem;
+        padding: 1rem 1.25rem;
+        border: 1px solid rgba(120, 130, 150, .22);
+        border-radius: 16px;
+        background: linear-gradient(135deg, rgba(70, 110, 170, .08), rgba(110, 90, 170, .05));
+    }
+    .tool-links-title {
+        margin: 0 0 .65rem;
+        color: #526b91;
+        font-size: .82rem;
+        font-weight: 700;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+    .tool-links-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .55rem;
+    }
+    .tool-links-list a {
+        display: inline-flex;
+        align-items: center;
+        padding: .52rem .8rem;
+        border: 1px solid rgba(90, 115, 155, .2);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, .76);
+        color: #526b91 !important;
+        font-size: .92rem;
+        font-weight: 600;
+        text-decoration: none !important;
+        transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+    }
+    .tool-links-list a:hover {
+        transform: translateY(-2px);
+        background: white;
+        box-shadow: 0 5px 16px rgba(45, 65, 100, .12);
+    }
+    </style>
+    <nav class="tool-links" aria-label="相關投資工具">
+      <div class="tool-links-title">🔗 延伸工具與參考網站</div>
+      <div class="tool-links-list">
+        <a href="https://nedku.github.io/RetirementDynamicClaimRule/" target="_blank" rel="noopener noreferrer">GK 動態提領計算機 ↗</a>
+        <a href="https://keepbuying.streamlit.app/" target="_blank" rel="noopener noreferrer">VM Timing 回測系統 ↗</a>
+        <a href="https://nedku.github.io/Martin-Armstrong-ECM-Economic-Confidence-Model-/" target="_blank" rel="noopener noreferrer">Martin Armstrong ECM (V25.0 - Pure English) ↗</a>
+        <a href="https://truthasset.streamlit.app/" target="_blank" rel="noopener noreferrer">Truth 1.0 Master Pro Dashboard ↗</a>
+        <a href="https://economic-window.vercel.app/scorecard.html" target="_blank" rel="noopener noreferrer">滯脹版經濟櫥窗 v2 ↗</a>
+        <a href="https://etfevaluation.streamlit.app/" target="_blank" rel="noopener noreferrer">ETF Dashboard ↗</a>
+        <a href="https://perpbr7line.streamlit.app/" target="_blank" rel="noopener noreferrer">PER/PBR Trend ↗</a>
+        <a href="https://ai.studio/apps/14786f1f-221c-49fd-843a-764b72ca9102" target="_blank" rel="noopener noreferrer">Rule#1估價 ↗</a>
+      </div>
+    </nav>
+    """,
+    unsafe_allow_html=True,
+)
         st.caption("⚠️ CNN 資料抓取失敗，目前使用手動輸入值。")
 
 
