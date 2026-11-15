@@ -1116,6 +1116,7 @@ def drawdown_episode_summary(ticker, label, df, threshold=-20.0):
     drawdown = (prices / prices.rolling(252, min_periods=1).max() - 1) * 100
     below_threshold = drawdown <= threshold
     crossed_below = below_threshold & ~below_threshold.shift(1, fill_value=False)
+    crossed_below.iloc[0] = False
 
     crossing_positions = list(drawdown.index[crossed_below])
     left_censored = bool(below_threshold.iloc[0])
