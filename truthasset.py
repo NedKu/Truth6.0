@@ -70,7 +70,7 @@ with st.expander("📘 新增功能判斷準則總覽", expanded=False):
 def fetch_system_data():
     end = datetime.now()
     start = end - timedelta(days=730)
-    tickers = ["VT", "0050.TW", "QQQ", "^GSPC", "^VIX"]
+    tickers = ["VT", "0050.TW", "QQQ", "^GSPC", "^VIX", "SPY"]
     raw_data = yf.download(tickers, start=start, end=end, progress=False, auto_adjust=False)
 
     if raw_data is None or raw_data.empty:
@@ -99,6 +99,50 @@ def fetch_system_data():
     low = low.reindex(columns=tickers)
 
     return close, volume, low
+
+
+def evaluate_oneil_daily_rule(close_series, volume_series, market_timezone):
+    """Evaluate O'Neil's daily price-gain and higher-volume conditions."""
+    if close_series is None or volume_series is None:
+        return None
+
+    data = pd.concat(
+        [close_series.rename("close"), volume_series.rename("volume")],
+        axis=1,
+    )
+    data["close"] = pd.to_numeric(data["close"], errors="coerce")
+    data["volume"] = pd.to_numeric(data["volume"], errors="coerce")
+    data = data.dropna(subset=["close", "volume"])
+
+    if data.empty:
+        return None
+
+    index = pd.DatetimeIndex(pd.to_datetime(data.index))
+    if index.tz is not None:
+        session_dates = index.tz_convert(market_timezone).date
+    else:
+        session_dates = index.date
+
+    today = pd.Timestamp.now(tz=market_timezone).date()
+    completed_mask = [session_date < today for session_date in session_dates]
+    data = data.loc[completed_mask]
+    session_dates = [session_date for session_date, completed in zip(session_dates, completed_mask) if completed]
+
+    if len(data) < 2:
+        return None
+
+    previous = data.iloc[-2]
+    latest = data.iloc[-1]
+    previous_volume = float(previous["volume"])
+    latest_volume = float(latest["volume"])
+
+    return {
+        "date": session_dates[-1].isoformat(),
+        "change_pct": (float(latest["close"]) / float(previous["close"]) - 1) * 100,
+        "previous_volume": previous_volume,
+        "volume": latest_volume,
+        "volume_up": latest_volume > previous_volume,
+    }
 
 @st.cache_data(ttl=86400)
 def fetch_macro_data():
@@ -420,6 +464,64 @@ def evaluate_sentiment_cross(fg_score, vix_val, cpi_yoy, rate_val, spread_val):
 df_close, df_vol, df_low = fetch_system_data()
 df_macro, df_vix, pmi_info, cpi_nowcast_info = fetch_macro_data()
 cnn_fg_data = fetch_cnn_fear_greed()
+
+# --- 威廉・歐尼爾單日漲幅與成交量檢視 ---
+st.divider()
+st.subheader("📈 威廉・歐尼爾單日漲幅與成交量檢視")
+st.caption(
+    "比較最近一個已完成交易日與前一交易日：收盤漲幅是否達 1.25%／1.5%，"
+    "以及成交量是否增加。完整 Follow-Through Day（FTD）還需符合反彈日數等條件。"
+)
+
+oneil_assets = [
+    ("S&P 500", "^GSPC", "SPY", "America/New_York", "S&P 500 指數", "SPY（成交量代理）"),
+    ("VT", "VT", "VT", "America/New_York", "VT", "VT"),
+    ("0050.TW", "0050.TW", "0050.TW", "Asia/Taipei", "0050.TW", "0050.TW"),
+]
+oneil_rows = []
+for asset_name, price_ticker, volume_ticker, market_timezone, price_label, volume_label in oneil_assets:
+    price_series = df_close[price_ticker] if price_ticker in df_close.columns else None
+    volume_series = df_vol[volume_ticker] if volume_ticker in df_vol.columns else None
+    signal = evaluate_oneil_daily_rule(price_series, volume_series, market_timezone)
+
+    if signal is None:
+        oneil_rows.append({
+            "標的": asset_name,
+            "交易日": "資料不足",
+            "單日漲幅": "—",
+            "成交量比較": "—",
+            "成交量條件": "無法判斷",
+            "1.25% + 量增": "無法判斷",
+            "1.5% + 量增": "無法判斷",
+            "價格來源": price_label,
+            "成交量來源": volume_label,
+        })
+        continue
+
+    gain_125 = signal["change_pct"] >= 1.25
+    gain_150 = signal["change_pct"] >= 1.5
+    volume_text = (
+        f'{signal["volume"]:,.0f} vs {signal["previous_volume"]:,.0f}'
+        if signal["previous_volume"] > 0
+        else f'{signal["volume"]:,.0f} vs {signal["previous_volume"]:,.0f}'
+    )
+    oneil_rows.append({
+        "標的": asset_name,
+        "交易日": signal["date"],
+        "單日漲幅": f'{signal["change_pct"]:+.2f}%',
+        "成交量比較（當日 vs 前日）": volume_text,
+        "成交量條件": "✅ 放量" if signal["volume_up"] else "❌ 未放量",
+        "1.25% + 量增": "✅ 符合" if gain_125 and signal["volume_up"] else "❌ 未符合",
+        "1.5% + 量增": "✅ 符合" if gain_150 and signal["volume_up"] else "❌ 未符合",
+        "價格來源": price_label,
+        "成交量來源": volume_label,
+    })
+
+st.dataframe(pd.DataFrame(oneil_rows), use_container_width=True, hide_index=True)
+st.caption(
+    "標普 500 指數沒有可直接比較的個股成交量，因此以 SPY ETF 成交量作代理；"
+    "漲幅使用 ^GSPC 指數收盤價。量能僅在同一標的內與前一交易日比較。"
+)
 
 # --- 3. 側邊欄：個人化參數與 PMI 趨勢判斷 ---
 st.sidebar.header("👤 1. 個人化參數")
@@ -1064,7 +1166,7 @@ if "executed_levels" not in st.session_state:
 
 # --- 5. 數據解析 ---
 is_ftd, ftd_msg = False, "觀察中"
-ftd_guard = evaluate_ftd_guard(df_close["^GSPC"], df_vol["^GSPC"], df_low["^GSPC"])
+ftd_guard = evaluate_ftd_guard(df_close["^GSPC"], df_vol["SPY"], df_low["^GSPC"])
 ftd_confirmed = bool(ftd_guard.get("ftd_valid", False))
 ftd_msg = ftd_guard["message"]
 is_ftd = ftd_confirmed
