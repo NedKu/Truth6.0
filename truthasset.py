@@ -2386,6 +2386,7 @@ st.markdown(
         <a href="https://perpbr7line.streamlit.app/" target="_blank" rel="noopener noreferrer">PER/PBR Trend ↗</a>
         <a href="https://ai.studio/apps/14786f1f-221c-49fd-843a-764b72ca9102" target="_blank" rel="noopener noreferrer">Rule#1估價 ↗</a>
         <a href="https://nedku.github.io/Macro-Risk-Scanner/" target="_blank" rel="noopener noreferrer">Risk Scanner ↗</a>
+        <a href="https://technicalchart.streamlit.app/" target="_blank" rel="noopener noreferrer">TechnicalChart ↗</a>
       </div>
     </nav>
     """,
