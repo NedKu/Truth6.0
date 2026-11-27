@@ -581,10 +581,11 @@ def _find_rally_ftd(close_s, vol_s, low_s=None):
     data = pd.concat(columns, axis=1).sort_index()
     data = data.apply(pd.to_numeric, errors="coerce").dropna()
     data = data.loc[~data.index.duplicated(keep="last")].tail(25)
-    result = {"event": None, "rally_day": None, "rally_start": None}
+    result = {"event": None, "rally_day": None, "rally_start": None, "data_valid": False}
     if len(data) < 15:
         result["message"] = "數據不足"
         return result
+    result["data_valid"] = True
     low_column = "low" if low_s is not None else "close"
     bottom = int(np.argmin(data[low_column].to_numpy()))
     start = next(
@@ -644,8 +645,8 @@ def evaluate_ftd_guard(close_s, vol_s, low_s):
         return {
             "ftd_triggered": False, "ftd_valid": False,
             "ftd_day": None, "ftd_low": None, "ftd_price": None,
-            "cancel_price": None, "status": "Observing",
-            "days_since_ftd": None, "stop_investing": False,
+            "cancel_price": None, "status": "Observing" if rally["data_valid"] else "Pending verification",
+            "days_since_ftd": None, "stop_investing": False if rally["data_valid"] else None,
             "message": rally["message"],
         }
     ftd_price = event["price"]
@@ -728,7 +729,7 @@ def plan_market_deployments(drawdowns, defense_pool, stock_headroom, vix_series,
         level = get_drawdown_level(drawdown) if drawdown is not None else "資料不足"
         vix_state = evaluate_vix_ammo_delay(vix_series, level)
         requested = deployable_pool * LEVEL_ALLOCATIONS.get(level, 0) / 100.0
-        if vix_state["delay"] or stop_investing:
+        if vix_state["delay"] or stop_investing is not False:
             requested = 0.0
         plans[ticker] = {
             "label": label,
@@ -736,6 +737,7 @@ def plan_market_deployments(drawdowns, defense_pool, stock_headroom, vix_series,
             "level": level,
             "vix_delay": vix_state["delay"],
             "requested": requested,
+            "guard_pending": stop_investing is None,
         }
 
     requested_total = sum(plan["requested"] for plan in plans.values())
@@ -759,6 +761,8 @@ def show_market_deployments(plans, exit_signals, defense_pool, deployable_pool, 
             status = "資料不足"
         elif plan["level"] == "未觸發":
             status = "目前未達 -20%"
+        elif stop_investing is None:
+            status = "FTD Guard 待核實（尚未作進場決定）"
         elif stop_investing:
             status = "FTD Guard 暫停"
         elif plan["vix_delay"]:
@@ -772,7 +776,7 @@ def show_market_deployments(plans, exit_signals, defense_pool, deployable_pool, 
             "回檔": f"{plan['drawdown']:.2f}%" if plan["drawdown"] is not None else "資料不足",
             "當前進場 Level": plan["level"],
             "待賣 Level（模擬）": pending_exit_level(exit_signal) or "—",
-            "建議投入": f"{plan['invest']:.1f}%",
+            "建議投入": "待核實" if stop_investing is None else f"{plan['invest']:.1f}%",
             "狀態": status,
             "賣出判斷": exit_signal["現階段是否賣出"],
         })
@@ -1300,7 +1304,10 @@ def summarize_dip_exit(close_series, market_timezone):
 # --- 5. 數據解析 ---
 is_ftd, ftd_msg = False, "觀察中"
 ftd_guard = evaluate_ftd_guard(df_close["^GSPC"], df_vol["SPY"], df_low["^GSPC"])
+ftd_pending = ftd_guard.get("stop_investing") is None
 ftd_confirmed = bool(ftd_guard.get("ftd_valid", False))
+if ftd_pending:
+    st.warning("FTD Guard 待核實：資料不足，尚未作出允許或禁止進場的決定；其餘市場分析繼續。")
 ftd_msg = ftd_guard["message"]
 is_ftd = ftd_confirmed
 
@@ -1490,7 +1497,7 @@ elif "Caution" in decision_regime:
 else:
     current_mode = "🟢 正常"
 
-exit_ready = vt_curr_p > vt_ma200_v and vt_dd_v > -10 and not ftd_guard.get("stop_investing")
+exit_ready = vt_curr_p > vt_ma200_v and vt_dd_v > -10 and ftd_guard.get("stop_investing") is False
 defense_pool = bnd_p + csh_p
 remaining_cash = csh_p
 stock_headroom = max(0.0, MAX_STOCK_WEIGHT - stk_p)
@@ -1543,7 +1550,9 @@ if view_mode == "Master":
         current_mode,
     )
     # 根據目前模式產生對應的操作建議 (與 caption 寫在一起)
-    if suggested_invest > 0:
+    if ftd_pending:
+        guide_i = "FTD Guard 待核實；其他條件繼續分析，尚未作進場決定。"
+    elif suggested_invest > 0:
         guide_i = "VT／SPY／0050.TW 有市場專屬抄底訊號，依各自 Level 與共用資金上限部署。"
     elif highest_pending_level > 0:
         guide_i = f"目前未觸發新買；歷史模擬進場尚待賣出訊號：{pending_summary}。"
@@ -1558,7 +1567,7 @@ if view_mode == "Master":
 
     tension_c1.caption(f"{decision_regime}｜{regime_short_reason}｜📘 {guide_i}")
 
-    tension_c2.metric("抄底 Level", level_metric, f"新投入 {suggested_invest:.1f}%")
+    tension_c2.metric("抄底 Level", level_metric, "待核實" if ftd_pending else f"新投入 {suggested_invest:.1f}%")
     tension_c2.caption(f"當前進場：{level_summary}｜模擬待賣：{pending_summary}｜共用可部署額 {deployment_budget:.1f}%")
 
     tension_c3.metric("BLS/FRED Clock Phase", macro_background_bls["phase"])
@@ -1656,9 +1665,9 @@ else:
                 st.markdown("#### 🎁 VT／SPY／0050.TW 專屬抄底引擎")
                 engine_c1, engine_c2, engine_c3, engine_c4 = st.columns(4)
                 engine_c1.metric("進場／待賣 Level", level_metric)
-                engine_c2.metric("本次部署額 %", f"{suggested_invest:.1f}%")
+                engine_c2.metric("本次部署額 %", "待核實" if ftd_pending else f"{suggested_invest:.1f}%")
                 engine_c3.metric("可部署上限 %", f"{deployment_budget:.1f}%")
-                engine_c4.metric("FTD", "✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded")
+                engine_c4.metric("FTD", "待核實" if ftd_pending else ("✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded"))
                 show_market_deployments(market_deployments, market_exit_signals, defense_pool, deployable_defense_pool, deployment_budget, ftd_guard.get("stop_investing", False))
                 show_dip_sell_guide()
 
@@ -1701,7 +1710,9 @@ with nav1:
 - 模擬待賣 Level：{pending_summary}
 """
         )
-    if suggested_invest > 0:
+    if ftd_pending:
+        action_msg = "FTD Guard 待核實｜其他分析繼續｜尚未作進場決定"
+    elif suggested_invest > 0:
         action_msg = f"市場專屬抄底｜{level_summary}｜合計投入 {suggested_invest:.1f}%"
     elif highest_pending_level > 0:
         action_msg = f"模擬待賣觀察｜{pending_summary}｜目前無新買入額"
@@ -1715,7 +1726,9 @@ with nav1:
         action_msg = "正常航行｜維持配置比例｜必要時再平衡"
     st.markdown(f"### 🎯 指令行動：**{action_msg}**")
 
-    if suggested_invest > 0:
+    if ftd_pending:
+        st.info("FTD Guard 證據不足：部署金額待核實，並非已確認禁止買進。")
+    elif suggested_invest > 0:
         st.info("🔵 市場專屬 Level 已觸發：依 VT／SPY／0050.TW 各自回檔部署，共用防守資產池並保留 10%。")
     elif highest_pending_level > 0:
         st.info(f"🟠 最近一輪模擬進場尚未觸發賣出：{pending_summary}。請以實際成交紀錄確認持倉。")
@@ -1840,9 +1853,9 @@ if view_mode == "Master":
         )
     engine_c1, engine_c2, engine_c3, engine_c4 = st.columns(4)
     engine_c1.metric("進場／待賣 Level", level_metric)
-    engine_c2.metric("本次部署額 %", f"{suggested_invest:.1f}%")
+    engine_c2.metric("本次部署額 %", "待核實" if ftd_pending else f"{suggested_invest:.1f}%")
     engine_c3.metric("可部署上限 %", f"{deployment_budget:.1f}%")
-    engine_c4.metric("FTD", "✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded")
+    engine_c4.metric("FTD", "待核實" if ftd_pending else ("✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded"))
     show_market_deployments(market_deployments, market_exit_signals, defense_pool, deployable_defense_pool, deployment_budget, ftd_guard.get("stop_investing", False))
     show_dip_sell_guide()
 
@@ -2191,6 +2204,10 @@ if view_mode == "Master":
         if bond_protection_on and asset_type == "BOND":
             reason_bits.append("Bond Protection 開啟，債券目標可能被現金取代")
 
+        if ftd_pending and ("BUY" in str(trigger) or trigger == "TACTICAL_DEPLOYMENT"):
+            status = "FTD Guard 待核實"
+            action = "其他條件已計算；進場決定待核實"
+            trigger = "PENDING_VERIFICATION"
         rebalance_status_priority.append(status)
         rebalance_rows.append({
             "資產": asset_name,
@@ -2383,3 +2400,4 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
