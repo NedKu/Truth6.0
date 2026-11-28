@@ -7,14 +7,14 @@ import numpy as np
 import plotly.graph_objects as go
 import re
 from datetime import datetime, timedelta
+from ftd import CANCEL_FACTOR, FTD_VERSION, completed_sessions, replay_ftd
 
 # --- 1. 初始化與介面設定 ---
 st.set_page_config(page_title="Truth 1.0 Master Pro Dashboard", layout="wide", page_icon="🧭")
 st.title("🧭 真理 1.0：大師靈魂 x 4D 宏觀導航系統 (Master Pro)")
 st.markdown("遵循 **三層作戰系統**：底層被動結構、中層年齡滑動路徑 (Glide Path)、頂層 4D 宏觀微調。")
 
-FTD_INVALIDATION_WINDOW = 5
-FTD_CANCEL_PCT = 0.98
+FTD_CANCEL_PCT = CANCEL_FACTOR
 GOLD_REBALANCE_BAND = 2.0
 STOCK_REBALANCE_BAND = 5.0
 BOND_REBALANCE_BAND = 5.0
@@ -23,6 +23,7 @@ BOND_PROTECTION_CPI_THRESHOLD = 3.5
 NEGATIVE_SURPRISE_THRESHOLD = 0.15
 POSITIVE_SURPRISE_THRESHOLD = -0.15
 MAX_STOCK_WEIGHT = 90.0
+st.caption(FTD_VERSION)
 
 with st.expander("📘 新增功能判斷準則總覽", expanded=False):
     st.markdown(
@@ -41,9 +42,12 @@ with st.expander("📘 新增功能判斷準則總覽", expanded=False):
 - 最終 `Decision Regime` 依據市場廣度與主軸取較保守結果。
 
 ### 3. FTD Guard（Follow-Through Day 防錯）
-- 以 `^GSPC` 為基準，以近25筆資料的本輪低點為基準，首次收盤上漲日算反彈第1個交易日，偵測第4~12個交易日漲幅至少1.7%且量大於前日的FTD；低點被跌破後重新起算。
+- 以 `^GSPC` 日價格、`SPY` 日量代理為共用 Guard；原生日資料按共同有效交易日內連接，不補值，排除尚未收盤資料，逐日重播全部可取得歷史。
+- 新反彈沿用25個原生交易日局部新低辨識；首個收盤上漲日為 Day 1，跌破 Day 1 盤中低點則重新起算。第4~12個交易日漲幅至少1.7%且量大於前日才成立；25日低點辨識與12日截止是本模型設定，不是通用標準。已成立／失效事件不因離開25日視窗消失。
 - **FTD 特赦**：在 `Caution` 模式下，若 FTD 有效，系統會配發 +5% 的股票特赦權重，抵銷部分減碼。
-- 若現價跌破取消價（FTD 收盤價 × {FTD_CANCEL_PCT:.2f}），FTD 轉為 `🔴 Failed`，停止積極買入。
+- **技術 FTD 失效**：後續盤中低點嚴格低於 FTD 當日低點。
+- **2% 策略風控**：後續已完成日收盤嚴格低於 FTD 收盤 × {FTD_CANCEL_PCT:.2f}；這是額外策略規則，不是通用 FTD 定義。
+- 任一條件觸發後持續阻擋新增積極投入；僅反彈回線上不解除，須失效後新一輪有效 FTD。歷史缺口或最新資料不足顯示待核實，不以缺資料放行。
 
 ### 4. 抄底引擎（Drawdown Levels）
 - VT、SPY、0050.TW 各依本身回檔階梯（-20%/-25%/-30%/-35%/-40%）啟動專屬抄底 Level。
@@ -79,13 +83,13 @@ def fetch_system_data():
         return empty_frame.copy(), empty_frame.copy(), empty_frame.copy()
 
     if isinstance(raw_data.columns, pd.MultiIndex):
-        close = raw_data["Close"].ffill() if "Close" in raw_data.columns.get_level_values(0) else pd.DataFrame(index=raw_data.index)
-        volume = raw_data["Volume"].ffill() if "Volume" in raw_data.columns.get_level_values(0) else pd.DataFrame(index=raw_data.index)
-        low = raw_data["Low"].ffill() if "Low" in raw_data.columns.get_level_values(0) else pd.DataFrame(index=raw_data.index)
+        close = raw_data["Close"] if "Close" in raw_data.columns.get_level_values(0) else pd.DataFrame(index=raw_data.index)
+        volume = raw_data["Volume"] if "Volume" in raw_data.columns.get_level_values(0) else pd.DataFrame(index=raw_data.index)
+        low = raw_data["Low"] if "Low" in raw_data.columns.get_level_values(0) else pd.DataFrame(index=raw_data.index)
     else:
-        close = raw_data[["Close"]].rename(columns={"Close": tickers[0]}).ffill() if "Close" in raw_data.columns else pd.DataFrame(index=raw_data.index)
-        volume = raw_data[["Volume"]].rename(columns={"Volume": tickers[0]}).ffill() if "Volume" in raw_data.columns else pd.DataFrame(index=raw_data.index)
-        low = raw_data[["Low"]].rename(columns={"Low": tickers[0]}).ffill() if "Low" in raw_data.columns else pd.DataFrame(index=raw_data.index)
+        close = raw_data[["Close"]].rename(columns={"Close": tickers[0]}) if "Close" in raw_data.columns else pd.DataFrame(index=raw_data.index)
+        volume = raw_data[["Volume"]].rename(columns={"Volume": tickers[0]}) if "Volume" in raw_data.columns else pd.DataFrame(index=raw_data.index)
+        low = raw_data[["Low"]].rename(columns={"Low": tickers[0]}) if "Low" in raw_data.columns else pd.DataFrame(index=raw_data.index)
 
     if isinstance(close, pd.Series):
         close = close.to_frame(name=tickers[0])
@@ -574,113 +578,64 @@ st.sidebar.info(
 )
 
 # --- 4. 技術指標與核心函數 ---
-def _find_rally_ftd(close_s, vol_s, low_s=None):
-    columns = [close_s.rename("close"), vol_s.rename("volume")]
-    if low_s is not None:
-        columns.append(low_s.rename("low"))
-    data = pd.concat(columns, axis=1).sort_index()
-    data = data.apply(pd.to_numeric, errors="coerce").dropna()
-    data = data.loc[~data.index.duplicated(keep="last")].tail(25)
-    result = {"event": None, "rally_day": None, "rally_start": None, "data_valid": False}
-    if len(data) < 15:
-        result["message"] = "數據不足"
-        return result
-    result["data_valid"] = True
-    low_column = "low" if low_s is not None else "close"
-    bottom = int(np.argmin(data[low_column].to_numpy()))
-    start = next(
-        (i for i in range(max(1, bottom), len(data))
-         if data["close"].iloc[i] > data["close"].iloc[i - 1]),
-        None,
-    )
-    if start is None:
-        result["message"] = "⏳ 尚未開始反彈嘗試"
-        return result
-    result["rally_start"] = data.index[start]
-    result["rally_day"] = len(data) - start
-    for i in range(start + 3, min(start + 12, len(data))):
-        previous_close = float(data["close"].iloc[i - 1])
-        if previous_close <= 0:
-            continue
-        change = float(data["close"].iloc[i]) / previous_close - 1
-        previous_volume = float(data["volume"].iloc[i - 1])
-        volume = float(data["volume"].iloc[i])
-        if change >= 0.017 and volume > previous_volume:
-            result["event"] = {
-                "date": data.index[i],
-                "low": float(data[low_column].iloc[i]),
-                "price": float(data["close"].iloc[i]),
-                "previous_close": previous_close,
-                "change_pct": change * 100,
-                "previous_volume": previous_volume,
-                "volume": volume,
-                "rally_day": i - start + 1,
-                "rally_start": data.index[start],
-                "sessions_since": len(data) - i - 1,
-            }
-            break
-    result["message"] = f"⏳ 觀察中 (反彈第 {result['rally_day']} 個交易日)"
-    return result
+@st.cache_data(ttl=1800)
+def fetch_native_ftd_history(ticker):
+    try:
+        history = yf.Ticker(ticker).history(period="max", auto_adjust=False, actions=False)
+        if history is None or history.empty:
+            return pd.DataFrame(), f"{ticker} 原生歷史未取得"
+        return history, None
+    except Exception as exc:
+        return pd.DataFrame(), f"{ticker} 原生歷史取得失敗：{exc}"
 
 
-def find_ftd_event(close_s, vol_s):
-    rally = _find_rally_ftd(close_s, vol_s)
-    event = rally["event"]
-    return {
-        "is_ftd": bool(event and event["sessions_since"] == 0),
-        "event_date": event["date"] if event else None,
-        "event_low": event["low"] if event else None,
-        "days_since": rally["rally_day"],
-        "message": (
-            f"🔥 偵測到 FTD (反彈第 {event['rally_day']} 個交易日)！"
-            if event and event["sessions_since"] == 0 else rally["message"]
-        ),
-    }
+def evaluate_market_ftd(price_ticker, volume_ticker=None):
+    volume_ticker = volume_ticker or price_ticker
+    prices, price_error = fetch_native_ftd_history(price_ticker)
+    volumes, volume_error = fetch_native_ftd_history(volume_ticker)
+    if price_error or volume_error:
+        return replay_ftd(None, {"error": price_error or volume_error, "stale": True})
+    calendar = "XTAI" if price_ticker.endswith(".TW") else "XNYS"
+    data, quality = completed_sessions(prices, volumes, calendar=calendar)
+    quality.update({"price_ticker": price_ticker, "volume_ticker": volume_ticker})
+    return replay_ftd(data, quality)
 
 
-def evaluate_ftd_guard(close_s, vol_s, low_s):
-    rally = _find_rally_ftd(close_s, vol_s, low_s)
-    event = rally["event"]
-    if event is None:
-        return {
-            "ftd_triggered": False, "ftd_valid": False,
-            "ftd_day": None, "ftd_low": None, "ftd_price": None,
-            "cancel_price": None, "status": "Observing" if rally["data_valid"] else "Pending verification",
-            "days_since_ftd": None, "stop_investing": False if rally["data_valid"] else None,
-            "message": rally["message"],
-        }
-    ftd_price = event["price"]
-    cancel_price = ftd_price * FTD_CANCEL_PCT
-    current_price = float(close_s.dropna().iloc[-1])
-    invalidated = current_price < cancel_price
-    evidence = (
-        f"反彈起日 {event['rally_start'].strftime('%Y-%m-%d')}，"
-        f"第 {event['rally_day']} 個交易日；"
-        f"收盤 {event['previous_close']:.2f} → {ftd_price:.2f}"
-        f"（{event['change_pct']:+.2f}%）；"
-        f"量 {event['previous_volume']:,.0f} → {event['volume']:,.0f}"
-    )
-    return {
-        "ftd_triggered": True, "ftd_valid": not invalidated,
-        "ftd_day": event["date"], "ftd_low": event["low"],
-        "ftd_price": ftd_price, "cancel_price": cancel_price,
-        "status": "🔴 Failed" if invalidated else "Confirmed",
-        "days_since_ftd": event["sessions_since"],
-        "stop_investing": invalidated,
-        "message": (
-            f"🔴 FTD 失效：現價 {current_price:.2f} 跌破 FTD 容損價 {cancel_price:.2f}。"
-            if invalidated else
-            f"✅ FTD 有效：^GSPC 於 {event['date'].strftime('%Y-%m-%d')} 出現 FTD，"
-            f"收盤 {ftd_price:.2f}，容損價 {cancel_price:.2f}。"
-        ) + evidence,
-    }
-
-
-def check_ftd_confirmed(close_s, vol_s=None):
-    if vol_s is None:
-        return False
-    ftd_event = find_ftd_event(close_s, vol_s)
-    return bool(ftd_event.get("is_ftd", False))
+def show_ftd_evidence(guard):
+    st.subheader("🔎 FTD 技術訊號與 2% 策略風控")
+    st.caption(f"{FTD_VERSION}｜^GSPC 價格／SPY 成交量代理｜25日辨識局部新低，事件逐日重播且不隨視窗到期")
+    a, b, c = st.columns(3)
+    a.metric("技術 FTD", guard["technical_status"])
+    b.metric("2% 策略風控", guard["policy_status"])
+    c.metric("新增積極投入閘門", "待核實" if guard["stop_investing"] is None else ("阻擋" if guard["stop_investing"] else "未阻擋"))
+    st.write(guard["message"])
+    quality = guard["quality"]
+    st.caption(f"原生日資料：{quality.get('start_date', '未取得')} ～ {quality.get('latest_date', '未取得')}；應有最新已收盤日：{quality.get('expected_date', '未取得')}；歷史缺口：{quality.get('gap_count', '未取得')}")
+    with st.expander("FTD 成立、失效與解除證據", expanded=False):
+        def date_text(value):
+            return pd.Timestamp(value).strftime("%Y-%m-%d") if value is not None else "未取得"
+        event = guard.get("event") or {}
+        rows = [
+            {"項目": "本輪低點日／盤中低點", "證據": f"{date_text(guard.get('bottom_date'))} / {guard.get('bottom_price')}"},
+            {"項目": "反彈起日／目前交易日數", "證據": f"{date_text(guard.get('rally_start'))} / {guard.get('rally_day')}"},
+            {"項目": "最近 FTD 日／成立時交易日數", "證據": f"{date_text(guard.get('ftd_day'))} / {event.get('rally_day', '未取得')}"},
+            {"項目": "FTD 當／前日收盤", "證據": f"{event.get('price', '未取得')} / {event.get('previous_close', '未取得')}"},
+            {"項目": "FTD 漲幅／量比", "證據": f"{event.get('change_pct', '未取得')}% / {event.get('volume_ratio', '未取得')}"},
+            {"項目": "FTD 當／前日成交量（SPY代理）", "證據": f"{event.get('volume', '未取得')} / {event.get('previous_volume', '未取得')}"},
+            {"項目": "FTD 技術低點／2% 策略線", "證據": f"{guard.get('ftd_low')} / {guard.get('cancel_price')}"},
+            {"項目": "首次阻擋日", "證據": date_text(guard.get("failure_date"))},
+        ]
+        st.table(pd.DataFrame(rows))
+        candidate = guard.get("candidate")
+        if candidate:
+            st.write("最近檢查的候選日（不等於已確認 FTD）")
+            st.json({key: str(value) if isinstance(value, pd.Timestamp) else value for key, value in candidate.items()})
+        events = pd.DataFrame(guard.get("events", []))
+        if not events.empty:
+            st.dataframe(events.tail(50), hide_index=True, use_container_width=True)
+            st.download_button("下載完整 FTD 事件紀錄 CSV", events.to_csv(index=False).encode("utf-8-sig"), "ftd_event_history.csv", "text/csv")
+        st.markdown("成立門檻採1.7%、量高於前一交易日；25日局部新低辨識、第4–12日搜尋是本模型設定。技術失效看FTD當日盤中低點；收盤跌2%是另加風控。兩者皆不代表實際成交。")
+        st.markdown("來源：[O’Neil 團隊 FTD 研究](https://tollbit.forbes.com/sites/randywatts/2025/03/07/follow-through-day-study-update/) · [TraderLion 技術失效說明](https://traderlion.com/wp-content/uploads/2021/03/Growth%20Investing%20and%20Super-Performance%20Stocks.pdf)")
 
 
 LEVEL_ALLOCATIONS = {
@@ -1071,6 +1026,13 @@ def evaluate_rebalance_action(asset_type, current_pct, target_pct, mkt_data):
     drift = current_pct - target_pct
     band = STOCK_REBALANCE_BAND if asset_type in ["VT", "TW", "STOCK"] else GOLD_REBALANCE_BAND if asset_type == "GOLD" else BOND_REBALANCE_BAND
 
+    if asset_type in ["VT", "TW", "STOCK"] and drift < -band:
+        guard = mkt_data.get("stop_investing")
+        if guard is None:
+            return "PENDING_VERIFICATION"
+        if guard:
+            return "GUARD_BLOCKED"
+
     if asset_type == "CASH":
         if mkt_data.get("deployment_pct", 0.0) > 0:
             return "TACTICAL_DEPLOYMENT"
@@ -1303,7 +1265,8 @@ def summarize_dip_exit(close_series, market_timezone):
 
 # --- 5. 數據解析 ---
 is_ftd, ftd_msg = False, "觀察中"
-ftd_guard = evaluate_ftd_guard(df_close["^GSPC"], df_vol["SPY"], df_low["^GSPC"])
+ftd_guard = evaluate_market_ftd("^GSPC", "SPY")
+show_ftd_evidence(ftd_guard)
 ftd_pending = ftd_guard.get("stop_investing") is None
 ftd_confirmed = bool(ftd_guard.get("ftd_valid", False))
 if ftd_pending:
@@ -1431,16 +1394,17 @@ for ticker, label in radar_tickers.items():
     high_1y = float(series.tail(252).max()) if not series.empty else price
     dd = (price - high_1y) / high_1y * 100 if high_1y else 0.0
     level = get_drawdown_level(dd)
-    asset_ftd = check_ftd_confirmed(series, vol_series)
+    asset_evidence = ftd_guard if ticker == "^GSPC" else evaluate_market_ftd(ticker)
+    asset_ftd = bool(asset_evidence.get("ftd_valid"))
     trigger = "✅ 是" if level != "未觸發" else "❌ 否"
-    market_stats[ticker] = {"price": price, "ma200": ma200, "drawdown": dd, "ftd": asset_ftd}
+    market_stats[ticker] = {"price": price, "ma200": ma200, "drawdown": dd, "ftd": asset_ftd, "ftd_status": asset_evidence["status"]}
     radar_rows.append({
         "資產": label,
         "現價": f"{price:.2f}",
         "200MA": f"{ma200:.2f}",
         "回檔 %": f"{dd:.1f}%",
         "Level": level,
-        "FTD 狀態": "✅ FTD Confirmed" if asset_ftd else "⏳ 未確認",
+        "FTD 狀態": asset_evidence["status"],
         "是否觸發買點": trigger,
     })
 
@@ -1609,10 +1573,10 @@ with st.expander("❓ 這裡怎麼判斷？", expanded=False):
     )
 
 layer1_df = pd.DataFrame([
-    {"資產": "VT", "現價": f"{market_stats['VT']['price']:.2f}", "200MA": f"{market_stats['VT']['ma200']:.2f}", "回檔": f"{market_stats['VT']['drawdown']:.1f}%", "FTD": "FTD Confirmed ✅" if market_stats['VT']['ftd'] else "未確認 ⏳", "趨勢": "多頭" if market_stats['VT']['price'] > market_stats['VT']['ma200'] else "空頭"},
-    {"資產": "SPY", "現價": f"{market_stats['^GSPC']['price']:.2f}", "200MA": f"{market_stats['^GSPC']['ma200']:.2f}", "回檔": f"{market_stats['^GSPC']['drawdown']:.1f}%", "FTD": "FTD Confirmed ✅" if market_stats['^GSPC']['ftd'] else "未確認 ⏳", "趨勢": "多頭" if market_stats['^GSPC']['price'] > market_stats['^GSPC']['ma200'] else "空頭"},
-    {"資產": "QQQ", "現價": f"{market_stats['QQQ']['price']:.2f}", "200MA": f"{market_stats['QQQ']['ma200']:.2f}", "回檔": f"{market_stats['QQQ']['drawdown']:.1f}%", "FTD": "FTD Confirmed ✅" if market_stats['QQQ']['ftd'] else "未確認 ⏳", "趨勢": "多頭" if market_stats['QQQ']['price'] > market_stats['QQQ']['ma200'] else "空頭"},
-    {"資產": "0050.TW", "現價": f"{market_stats['0050.TW']['price']:.2f}", "200MA": f"{market_stats['0050.TW']['ma200']:.2f}", "回檔": f"{market_stats['0050.TW']['drawdown']:.1f}%", "FTD": "FTD Confirmed ✅" if market_stats['0050.TW']['ftd'] else "未確認 ⏳", "趨勢": "多頭" if market_stats['0050.TW']['price'] > market_stats['0050.TW']['ma200'] else "空頭"},
+    {"資產": "VT", "現價": f"{market_stats['VT']['price']:.2f}", "200MA": f"{market_stats['VT']['ma200']:.2f}", "回檔": f"{market_stats['VT']['drawdown']:.1f}%", "FTD": market_stats['VT']['ftd_status'], "趨勢": "多頭" if market_stats['VT']['price'] > market_stats['VT']['ma200'] else "空頭"},
+    {"資產": "S&P 500 (^GSPC；SPY量代理)", "現價": f"{market_stats['^GSPC']['price']:.2f}", "200MA": f"{market_stats['^GSPC']['ma200']:.2f}", "回檔": f"{market_stats['^GSPC']['drawdown']:.1f}%", "FTD": market_stats['^GSPC']['ftd_status'], "趨勢": "多頭" if market_stats['^GSPC']['price'] > market_stats['^GSPC']['ma200'] else "空頭"},
+    {"資產": "QQQ", "現價": f"{market_stats['QQQ']['price']:.2f}", "200MA": f"{market_stats['QQQ']['ma200']:.2f}", "回檔": f"{market_stats['QQQ']['drawdown']:.1f}%", "FTD": market_stats['QQQ']['ftd_status'], "趨勢": "多頭" if market_stats['QQQ']['price'] > market_stats['QQQ']['ma200'] else "空頭"},
+    {"資產": "0050.TW", "現價": f"{market_stats['0050.TW']['price']:.2f}", "200MA": f"{market_stats['0050.TW']['ma200']:.2f}", "回檔": f"{market_stats['0050.TW']['drawdown']:.1f}%", "FTD": market_stats['0050.TW']['ftd_status'], "趨勢": "多頭" if market_stats['0050.TW']['price'] > market_stats['0050.TW']['ma200'] else "空頭"},
 ])
 
 if view_mode == "Beginner":
@@ -1667,7 +1631,7 @@ else:
                 engine_c1.metric("進場／待賣 Level", level_metric)
                 engine_c2.metric("本次部署額 %", "待核實" if ftd_pending else f"{suggested_invest:.1f}%")
                 engine_c3.metric("可部署上限 %", f"{deployment_budget:.1f}%")
-                engine_c4.metric("FTD", "待核實" if ftd_pending else ("✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded"))
+                engine_c4.metric("FTD", "待核實" if ftd_pending else ("🔴 阻擋" if ftd_guard.get("stop_investing") else "✅ Valid"))
                 show_market_deployments(market_deployments, market_exit_signals, defense_pool, deployable_defense_pool, deployment_budget, ftd_guard.get("stop_investing", False))
                 show_dip_sell_guide()
 
@@ -1855,7 +1819,7 @@ if view_mode == "Master":
     engine_c1.metric("進場／待賣 Level", level_metric)
     engine_c2.metric("本次部署額 %", "待核實" if ftd_pending else f"{suggested_invest:.1f}%")
     engine_c3.metric("可部署上限 %", f"{deployment_budget:.1f}%")
-    engine_c4.metric("FTD", "待核實" if ftd_pending else ("✅ Valid" if ftd_guard.get("ftd_valid") else "🟡 Guarded"))
+    engine_c4.metric("FTD", "待核實" if ftd_pending else ("🔴 阻擋" if ftd_guard.get("stop_investing") else "✅ Valid"))
     show_market_deployments(market_deployments, market_exit_signals, defense_pool, deployable_defense_pool, deployment_budget, ftd_guard.get("stop_investing", False))
     show_dip_sell_guide()
 
@@ -2145,6 +2109,7 @@ if view_mode == "Master":
 
     rebalance_status_priority = []
     market_rebalance_context = {
+        "stop_investing": ftd_guard.get("stop_investing"),
         "is_ftd": ftd_guard.get("ftd_valid", False),
         "price": vt_curr_p,
         "ma200": vt_ma200_v,
@@ -2156,6 +2121,8 @@ if view_mode == "Master":
     }
 
     trigger_action_map = {
+        "PENDING_VERIFICATION": ("FTD Guard 待核實", "資料待核實；不新增積極股票投入"),
+        "GUARD_BLOCKED": ("🔴 FTD Guard 阻擋", "持續阻擋新增積極股票投入；等待新一輪有效 FTD"),
         "BUY_TO_TARGET": ("🟡 Buy", "買回目標配置"),
         "SELL_TO_TARGET": ("🔴 Sell", "賣回目標配置"),
         "HOLD": ("🟢 Hold", "不動"),

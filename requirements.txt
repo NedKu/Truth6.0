@@ -4,3 +4,4 @@ numpy
 yfinance
 requests
 plotly
+exchange-calendars>=4.5,<5
